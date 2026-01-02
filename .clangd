@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+Diagnostics:
+  UnusedIncludes: Strict
+# Suppress:
+# - pp_file_not_found_angled_include_not_fatal
+# - unused-includes
+# - drv_unknown_argument
+CompileFlags:
+  CompilationDatabase: build
+  Add: -Wno-unknown-warning-option
+  Remove:
+    - -mfp16-format=ieee
+    - -fno-reorder-functions
+    - -fno-printf-return-value

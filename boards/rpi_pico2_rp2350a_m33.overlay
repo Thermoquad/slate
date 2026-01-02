@@ -1,0 +1,66 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/* Add reverse compatability with Pico */
+pico_i2c0: &i2c0 {};
+pico_i2c1: &i2c1 {};
+pico_uart1: &uart1 {};
+
+&pinctrl {
+	uart1_default: uart1_default {
+		group1 {
+			pinmux = <UART1_TX_P8>;
+		};
+		group2 {
+			pinmux = <UART1_RX_P9>;
+			input-enable;
+		};
+	};
+};
+
+&pico_uart1 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-names = "default";
+};
+
+/ {
+  aliases {
+    sw0 = &qdec_btn;
+    helios-uart = &pico_uart1;
+  };
+
+  buttons: buttons {
+    compatible = "gpio-keys";
+    debounce-interval-ms = <50>;
+    qdec_btn: btn_pin {
+      gpios = <&pico_header 13 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+      label = "wheel";
+      zephyr,code = <INPUT_BTN_0>;
+    };
+  };
+
+  qdec_btn {
+    input = <&buttons>;
+    compatible = "zephyr,input-longpress";
+    input-codes = <INPUT_BTN_0>;
+    short-codes = <INPUT_BTN_1>;
+    long-codes = <INPUT_BTN_2>;
+    long-delay-ms = <420>;
+  };
+
+  qdec {
+    compatible = "gpio-qdec";
+    status = "okay";
+    gpios = <&pico_header 14 (GPIO_PULL_UP | GPIO_ACTIVE_HIGH)>,
+            <&pico_header 15 (GPIO_PULL_UP | GPIO_ACTIVE_HIGH)>;
+    steps-per-period = <4>;
+    zephyr,axis = <INPUT_REL_WHEEL>;
+    sample-time-us = <1000>;
+    idle-timeout-ms = <100>;
+  };
+};
