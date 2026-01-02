@@ -40,6 +40,10 @@ static helios_state_t helios_state = HELIOS_STATE_INITIALIZING;
 static helios_error_t helios_error = HELIOS_ERROR_NONE;
 static uint32_t helios_uptime_ms = 0;
 
+/* Telemetry Control */
+static bool telemetry_enabled_sent = false; // Track if we've enabled telemetry
+static bool telemetry_received = false; // Track if we've received any telemetry
+
 /* Forward Declarations */
 static void process_packet(const helios_packet_t *packet);
 static void send_packet(const helios_packet_t *packet);
@@ -108,6 +112,18 @@ static void process_packet(const helios_packet_t *packet) {
         (helios_data_ping_response_t *)packet->payload;
     helios_uptime_ms = response->uptime_ms;
     LOG_DBG("Ping response received (uptime=%u ms)", helios_uptime_ms);
+
+    // Enable telemetry on first ping response (protocol v1.2)
+    if (!telemetry_enabled_sent) {
+      LOG_INF("First ping response received - enabling telemetry on Helios");
+      serial_master_send_telemetry_config(true, 100, 0);
+      telemetry_enabled_sent = true;
+    }
+    // Retry enabling telemetry if we haven't received any yet
+    else if (!telemetry_received) {
+      LOG_WRN("No telemetry received yet - retrying enable command");
+      serial_master_send_telemetry_config(true, 100, 0);
+    }
     break;
   }
 
@@ -124,6 +140,12 @@ static void process_packet(const helios_packet_t *packet) {
         (helios_data_telemetry_bundle_t *)packet->payload;
     helios_state = bundle->state;
     helios_error = bundle->error;
+
+    // Mark that we've received telemetry
+    if (!telemetry_received) {
+      LOG_INF("Telemetry successfully enabled - receiving bundles");
+      telemetry_received = true;
+    }
 
     LOG_DBG("Telemetry: state=%u, error=%u, motors=%u, temps=%u", bundle->state,
             bundle->error, bundle->motor_count, bundle->temp_count);
@@ -218,6 +240,16 @@ void serial_master_send_ping(void) {
   send_packet(&packet);
 }
 
+/* Public API - Send Telemetry Config Command */
+void serial_master_send_telemetry_config(bool enabled, uint32_t interval_ms,
+                                         uint32_t mode) {
+  helios_packet_t packet;
+  helios_create_telemetry_config(&packet, enabled, interval_ms, mode);
+  send_packet(&packet);
+  LOG_INF("Telemetry config: enabled=%d, interval=%u ms, mode=%u", enabled,
+          interval_ms, mode);
+}
+
 /* Public API - Send Set Mode Command */
 void serial_master_set_mode(helios_mode_t mode, uint32_t parameter) {
   helios_packet_t packet;
@@ -281,10 +313,14 @@ int serial_master_init(void) {
 void serial_tx_thread(void) {
   LOG_DBG("Serial TX thread started");
 
+  // Wait briefly for Helios to initialize
+  k_sleep(K_SECONDS(1));
+
   while (1) {
     // Send ping every 10 seconds (Helios timeout is 30s)
-    k_sleep(K_SECONDS(10));
+    // Telemetry will be enabled when first ping response is received
     serial_master_send_ping();
+    k_sleep(K_SECONDS(10));
   }
 }
 

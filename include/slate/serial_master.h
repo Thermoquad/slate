@@ -23,6 +23,16 @@ int serial_master_init(void);
 void serial_master_send_ping(void);
 
 /**
+ * Send telemetry config command to Helios ICU (protocol v1.2)
+ *
+ * @param enabled Enable/disable telemetry broadcasts
+ * @param interval_ms Telemetry broadcast interval (100-5000 ms)
+ * @param mode Telemetry mode (0=bundled, 1=individual)
+ */
+void serial_master_send_telemetry_config(bool enabled, uint32_t interval_ms,
+                                         uint32_t mode);
+
+/**
  * Send set mode command to Helios ICU
  *
  * @param mode Operating mode
