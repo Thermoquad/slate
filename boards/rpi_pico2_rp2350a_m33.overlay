@@ -3,17 +3,21 @@
  */
 
 #include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
 
 /* Add reverse compatability with Pico */
 pico_i2c0: &i2c0 {
 	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
 
 	sh1106_sh1106_128x64: ssd1306@3c {
-		compatible = "sinowealth,sh1106";
+		compatible = "solomon,ssd1306fb";
 		reg = <0x3c>;
 		width = <128>;
 		height = <64>;
-		segment-offset = <2>;
+		segment-offset = <0>;
 		page-offset = <0>;
 		display-offset = <0>;
 		multiplex-ratio = <63>;
@@ -35,6 +39,19 @@ pico_uart1: &uart1 {};
 			input-enable;
 		};
 	};
+
+	i2c0_default: i2c0_default {
+		group1 {
+			pinmux = <I2C0_SDA_P8>;
+			input-enable;
+			bias-pull-up;
+		};
+		group2 {
+			pinmux = <I2C0_SCL_P9>;
+			input-enable;
+			bias-pull-up;
+		};
+	};
 };
 
 &pico_uart1 {
@@ -45,6 +62,10 @@ pico_uart1: &uart1 {};
 };
 
 / {
+  chosen {
+    zephyr,display = &sh1106_sh1106_128x64;
+  };
+
   aliases {
     sw0 = &qdec_btn;
     helios-uart = &pico_uart1;

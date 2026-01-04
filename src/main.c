@@ -10,10 +10,18 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/zbus/zbus.h>
 
+#include <slate/display.h>
 #include <slate/serial_handler.h>
 #include <slate/zbus.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
+
+//////////////////////////////////////////////////////////////
+// Zbus Observers
+//////////////////////////////////////////////////////////////
+
+ZBUS_LISTENER_DEFINE(display_listener, display_telemetry_callback);
+
 
 //////////////////////////////////////////////////////////////
 // Zbus Channel Definitions
@@ -32,6 +40,20 @@ ZBUS_CHAN_DEFINE(helios_state_command_chan,
     NULL, // No user data
     ZBUS_OBSERVERS(serial_handler_listener), // Serial handler subscribes
     ZBUS_MSG_INIT(.mode = HELIOS_MODE_IDLE, .parameter = 0) // Initialize to idle
+);
+
+/**
+ * Helios telemetry data channel
+ *
+ * Published by serial handler when telemetry is received from Helios ICU.
+ * Display listener receives updates via callback.
+ */
+ZBUS_CHAN_DEFINE(helios_telemetry_chan,
+    helios_telemetry_msg_t,
+    NULL, // No validator
+    NULL, // No user data
+    ZBUS_OBSERVERS(display_listener),
+    ZBUS_MSG_INIT(.valid = false) // Start with invalid data
 );
 
 //////////////////////////////////////////////////////////////
@@ -55,6 +77,7 @@ INPUT_CALLBACK_DEFINE(NULL, test_cb, NULL);
 
 /* Thread Definitions */
 K_THREAD_DEFINE(serial_id, CONFIG_MAIN_STACK_SIZE, serial_thread, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(display_id, 8192, display_thread, NULL, NULL, NULL, 4, 0, 0);
 
 int main(void)
 {

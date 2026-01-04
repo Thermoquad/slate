@@ -27,6 +27,7 @@ LOG_MODULE_REGISTER(slate_serial_handler);
 #define PING_INTERVAL_MS 10000
 #define TELEMETRY_TIMEOUT_MS 30000
 #define EMERGENCY_STOP_RETRANSMIT_MS 250
+#define PUB_TIMEOUT K_MSEC(10)
 
 //////////////////////////////////////////////////////////////
 // Serial State
@@ -252,6 +253,7 @@ static void process_packet(const helios_packet_t* packet, struct serial_state* s
 
   case HELIOS_MSG_TELEMETRY_BUNDLE: {
     helios_data_telemetry_bundle_t* bundle = (helios_data_telemetry_bundle_t*)packet->payload;
+
     state->helios_state = bundle->state;
     state->helios_error = bundle->error;
 
@@ -272,8 +274,39 @@ static void process_packet(const helios_packet_t* packet, struct serial_state* s
     LOG_DBG("Telemetry: state=%u, error=%u, motors=%u, temps=%u", bundle->state,
         bundle->error, bundle->motor_count, bundle->temp_count);
 
+    // Validate packet counts to prevent buffer overruns
+    if (bundle->motor_count > 10 || bundle->temp_count > 10) {
+      LOG_ERR("Corrupted telemetry packet: motor_count=%u, temp_count=%u (max 10 each)",
+              bundle->motor_count, bundle->temp_count);
+      LOG_ERR("Rejecting corrupted packet to prevent buffer overrun");
+      break;
+    }
+
+    // Validate packet length matches expected data size
+    size_t expected_payload_size = sizeof(helios_data_telemetry_bundle_t)
+        + (bundle->motor_count * sizeof(helios_telemetry_motor_t))
+        + (bundle->temp_count * sizeof(helios_telemetry_temperature_t));
+
+    if (packet->length != expected_payload_size) {
+      LOG_ERR("Telemetry packet length mismatch: received=%u, expected=%zu",
+              packet->length, expected_payload_size);
+      LOG_ERR("Rejecting corrupted packet (motor_count=%u, temp_count=%u)",
+              bundle->motor_count, bundle->temp_count);
+      break;
+    }
+
     // Parse variable-length data
     const uint8_t* ptr = packet->payload + sizeof(helios_data_telemetry_bundle_t);
+
+    // Prepare telemetry message for Zbus
+    helios_telemetry_msg_t telemetry_msg = {
+      .state = bundle->state,
+      .error = bundle->error,
+      .temperature = 0.0,
+      .motor_rpm = 0,
+      .motor_target_rpm = 0,
+      .valid = true
+    };
 
     // Read motor data
     for (int i = 0; i < bundle->motor_count; i++) {
@@ -283,6 +316,21 @@ static void process_packet(const helios_packet_t* packet, struct serial_state* s
           : 0;
       LOG_DBG("Motor %d: RPM=%u, target=%u, PWM=%u%% (%u/%u ns)", i, motor->rpm,
           motor->target_rpm, pwm_percent, motor->pwm_duty, motor->pwm_period);
+
+      // Store first motor data in telemetry message
+      if (i == 0) {
+        telemetry_msg.motor_rpm = motor->rpm;
+        telemetry_msg.motor_target_rpm = motor->target_rpm;
+
+        // Log suspicious high values
+        if (motor->rpm > 6000 || motor->target_rpm > 6000) {
+          LOG_WRN("Suspicious high RPM values: rpm=%d target=%d",
+                  motor->rpm, motor->target_rpm);
+        }
+
+        LOG_DBG("Parsed motor data: rpm=%d target=%d", motor->rpm, motor->target_rpm);
+      }
+
       ptr += sizeof(helios_telemetry_motor_t);
     }
 
@@ -290,8 +338,22 @@ static void process_packet(const helios_packet_t* packet, struct serial_state* s
     for (int i = 0; i < bundle->temp_count; i++) {
       helios_telemetry_temperature_t* temp = (helios_telemetry_temperature_t*)ptr;
       LOG_DBG("Temp %d: %.1f°C", i, (double)temp->temperature);
+
+      // Store first temperature reading in telemetry message
+      if (i == 0) {
+        telemetry_msg.temperature = (double)temp->temperature;
+        LOG_DBG("Parsed temperature: %.1f", (double)temp->temperature);
+      }
+
       ptr += sizeof(helios_telemetry_temperature_t);
     }
+
+    // Publish to Zbus
+    int ret = zbus_chan_pub(&helios_telemetry_chan, &telemetry_msg, PUB_TIMEOUT);
+    if (ret != 0) {
+      LOG_WRN("Failed to publish telemetry to Zbus: %d", ret);
+    }
+
     break;
   }
 
@@ -577,6 +639,7 @@ void helios_get_state(helios_state_t* state, helios_error_t* error)
     *error = serial_state.helios_error;
   }
 }
+
 
 //////////////////////////////////////////////////////////////
 // Initialization
