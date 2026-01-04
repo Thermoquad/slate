@@ -9,10 +9,12 @@
 
 #include <fusain/fusain.h>
 #include <slate/serial_master.h>
+#include <slate/zbus.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/zbus/zbus.h>
 
 LOG_MODULE_REGISTER(slate_serial_handler);
 
@@ -379,3 +381,20 @@ void serial_rx_thread(void)
     }
   }
 }
+
+/* Zbus Listener - Handles Helios state commands from shell/UI */
+static void serial_handler_listener_cb(const struct zbus_channel* chan)
+{
+  // Only handle helios_state_command_chan
+  if (chan == &helios_state_command_chan) {
+    // In listener callback, channel is already locked - use const_msg
+    const helios_state_command_msg_t* cmd = zbus_chan_const_msg(chan);
+
+    LOG_INF("Received state command: mode=%u, parameter=%u", cmd->mode, cmd->parameter);
+
+    // Send SET_MODE command to Helios via serial protocol
+    serial_master_set_mode(cmd->mode, cmd->parameter);
+  }
+}
+
+ZBUS_LISTENER_DEFINE(serial_handler_listener, serial_handler_listener_cb);
