@@ -20,7 +20,7 @@ int serial_master_init(void);
 /**
  * Send ping request to Helios ICU
  */
-void serial_master_send_ping(void);
+void helios_send_ping(void);
 
 /**
  * Send telemetry config command to Helios ICU (protocol v1.2)
@@ -29,8 +29,8 @@ void serial_master_send_ping(void);
  * @param interval_ms Telemetry broadcast interval (100-5000 ms)
  * @param mode Telemetry mode (0=bundled, 1=individual)
  */
-void serial_master_send_telemetry_config(bool enabled, uint32_t interval_ms,
-                                         uint32_t mode);
+void helios_send_telemetry_config(bool enabled, uint32_t interval_ms,
+    uint32_t mode);
 
 /**
  * Send set mode command to Helios ICU
@@ -38,7 +38,7 @@ void serial_master_send_telemetry_config(bool enabled, uint32_t interval_ms,
  * @param mode Operating mode
  * @param parameter Mode-specific parameter (e.g., pump rate for heating)
  */
-void serial_master_set_mode(helios_mode_t mode, uint32_t parameter);
+void helios_set_mode(helios_mode_t mode, uint32_t parameter);
 
 /**
  * Get last known Helios state
@@ -46,18 +46,12 @@ void serial_master_set_mode(helios_mode_t mode, uint32_t parameter);
  * @param state Output state (can be NULL)
  * @param error Output error (can be NULL)
  */
-void serial_master_get_state(helios_state_t* state, helios_error_t* error);
+void helios_get_state(helios_state_t* state, helios_error_t* error);
 
 /**
- * Serial TX thread entry point
- * Sends periodic pings to keep Helios connection alive
+ * Serial thread entry point
+ * Handles both TX (periodic pings/telemetry config) and RX (packet processing)
  */
-void serial_tx_thread(void);
-
-/**
- * Serial RX thread entry point
- * Monitors connection status (RX handled by interrupt)
- */
-void serial_rx_thread(void);
+int serial_thread(void);
 
 #endif /* SLATE_SERIAL_MASTER_H */

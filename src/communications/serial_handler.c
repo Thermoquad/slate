@@ -8,7 +8,7 @@
  */
 
 #include <fusain/fusain.h>
-#include <slate/serial_master.h>
+#include <slate/serial_handler.h>
 #include <slate/zbus.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -17,6 +17,44 @@
 #include <zephyr/zbus/zbus.h>
 
 LOG_MODULE_REGISTER(slate_serial_handler);
+
+//////////////////////////////////////////////////////////////
+// Config
+//////////////////////////////////////////////////////////////
+
+#define LOOP_SLEEP_MS 1
+#define TELEMETRY_REQUEST_INTERVAL_MS 500
+#define PING_INTERVAL_MS 10000
+#define TELEMETRY_TIMEOUT_MS 30000
+#define EMERGENCY_STOP_RETRANSMIT_MS 250
+
+//////////////////////////////////////////////////////////////
+// Serial State
+//////////////////////////////////////////////////////////////
+
+struct serial_state {
+  // Telemetry tracking
+  bool telemetry_received;
+  uint64_t last_telemetry_time;
+  uint64_t last_telemetry_request_time;
+
+  // Emergency stop
+  bool emergency_stop_active;
+  bool emergency_stop_confirmed;
+  uint64_t last_emergency_stop_time;
+
+  // Helios state (from telemetry)
+  helios_state_t helios_state;
+  helios_error_t helios_error;
+  uint32_t helios_uptime_ms;
+
+  // Ping tracking
+  uint64_t last_ping_time;
+};
+
+//////////////////////////////////////////////////////////////
+// Static Variables
+//////////////////////////////////////////////////////////////
 
 /* UART Device */
 static const struct device* uart_dev;
@@ -30,32 +68,100 @@ static size_t tx_index = 0;
 static size_t tx_length = 0;
 K_MUTEX_DEFINE(tx_mutex); // Protects TX buffer and state
 
-/* TX Packet Queue - API pushes, TX thread pops and transmits */
+/* TX Packet Queue - API pushes, thread pops and transmits */
 K_MSGQ_DEFINE(tx_packet_queue, sizeof(helios_packet_t), 8, 4);
 
 /* RX Packet Queue - ISR pushes, thread pops */
 K_MSGQ_DEFINE(rx_packet_queue, sizeof(helios_packet_t), 8, 4);
 
-/* Helios State (from telemetry) */
-static helios_state_t helios_state = HELIOS_STATE_INITIALIZING;
-static helios_error_t helios_error = HELIOS_ERROR_NONE;
-static uint32_t helios_uptime_ms = 0;
+/* Serial State */
+static struct serial_state serial_state;
 
-/* Telemetry Control */
-static bool telemetry_enabled_sent = false; // Track if we've enabled telemetry
-static bool telemetry_received = false; // Track if we've received any telemetry
+//////////////////////////////////////////////////////////////
+// Forward Declarations
+//////////////////////////////////////////////////////////////
 
-/* Emergency Stop Control (Protocol v1.3) */
-static bool emergency_stop_active = false;
-static bool emergency_stop_confirmed = false;
-
-/* Forward Declarations */
-static void process_packet(const helios_packet_t* packet);
+static void process_packet(const helios_packet_t* packet, struct serial_state* state,
+    uint64_t current_micros);
 static void send_packet(const helios_packet_t* packet);
-static void transmit_packet(const helios_packet_t* packet);
+static void fill_transmit_buffer(const helios_packet_t* packet);
 static void uart_isr(const struct device* dev, void* user_data);
+static void process_rx_packets(struct serial_state* state, uint64_t current_micros);
+static void process_tx_queue(void);
+static void handle_emergency_stop(struct serial_state* state, uint64_t current_micros);
+static void check_telemetry_timeout(struct serial_state* state, uint64_t current_micros);
+static void handle_telemetry_config(struct serial_state* state, uint64_t current_micros);
+static void handle_ping(struct serial_state* state, uint64_t current_micros);
 
-/* UART ISR - Handles both RX and TX interrupts */
+//////////////////////////////////////////////////////////////
+// Serial Thread
+//////////////////////////////////////////////////////////////
+
+/**
+ * Serial Thread - Handles both TX and RX operations
+ *
+ * Main thread for serial communication with Helios ICU.
+ * Processes received packets, transmits queued packets,
+ * and handles periodic tasks (ping, telemetry config).
+ */
+int serial_thread(void)
+{
+  LOG_DBG("Serial thread started");
+
+  // Initialize serial communication with Helios
+  int ret = serial_master_init();
+  if (ret < 0) {
+    LOG_ERR("Failed to initialize serial master: %d", ret);
+    return ret;
+  }
+
+  // Initialize state
+  serial_state.telemetry_received = false;
+  serial_state.last_telemetry_time = 0;
+  serial_state.last_telemetry_request_time = 0;
+  serial_state.emergency_stop_active = false;
+  serial_state.emergency_stop_confirmed = false;
+  serial_state.last_emergency_stop_time = 0;
+  serial_state.helios_state = HELIOS_STATE_INITIALIZING;
+  serial_state.helios_error = HELIOS_ERROR_NONE;
+  serial_state.helios_uptime_ms = 0;
+  serial_state.last_ping_time = 0;
+
+  while (1) {
+    const uint64_t current_micros = k_cyc_to_us_floor64(k_cycle_get_64());
+
+    // Process all pending RX packets
+    process_rx_packets(&serial_state, current_micros);
+
+    // Handle emergency stop (priority)
+    handle_emergency_stop(&serial_state, current_micros);
+
+    // Check telemetry timeout
+    check_telemetry_timeout(&serial_state, current_micros);
+
+    // Handle telemetry config requests
+    handle_telemetry_config(&serial_state, current_micros);
+
+    // Handle periodic pings
+    handle_ping(&serial_state, current_micros);
+
+    // Process one pending TX packet if available
+    process_tx_queue();
+
+    k_sleep(K_MSEC(LOOP_SLEEP_MS));
+  }
+}
+
+//////////////////////////////////////////////////////////////
+// UART Interrupt Service Routine
+//////////////////////////////////////////////////////////////
+
+/**
+ * UART ISR - Handles both RX and TX interrupts
+ *
+ * RX: Decodes incoming bytes and queues complete packets
+ * TX: Fills UART FIFO from buffer until transmission complete
+ */
 static void uart_isr(const struct device* dev, void* user_data)
 {
   ARG_UNUSED(user_data);
@@ -104,8 +210,18 @@ static void uart_isr(const struct device* dev, void* user_data)
   }
 }
 
-/* Process Received Packet (called from RX thread) */
-static void process_packet(const helios_packet_t* packet)
+//////////////////////////////////////////////////////////////
+// Packet Processing
+//////////////////////////////////////////////////////////////
+
+/**
+ * Process Received Packet
+ *
+ * Called from serial thread to process packets queued by UART ISR.
+ * Handles ping responses, telemetry, state data, and error messages.
+ */
+static void process_packet(const helios_packet_t* packet, struct serial_state* state,
+    uint64_t current_micros)
 {
   LOG_DBG("Processing packet: type=0x%02X, length=%u", packet->msg_type,
       packet->length);
@@ -113,47 +229,44 @@ static void process_packet(const helios_packet_t* packet)
   switch (packet->msg_type) {
   case HELIOS_MSG_PING_RESPONSE: {
     helios_data_ping_response_t* response = (helios_data_ping_response_t*)packet->payload;
-    helios_uptime_ms = response->uptime_ms;
-    LOG_DBG("Ping response received (uptime=%u ms)", helios_uptime_ms);
-
-    // Enable telemetry on first ping response (protocol v1.2)
-    if (!telemetry_enabled_sent) {
-      LOG_INF("First ping response received - enabling telemetry on Helios");
-      serial_master_send_telemetry_config(true, 100, 0);
-      telemetry_enabled_sent = true;
-    }
-    // Retry enabling telemetry if we haven't received any yet
-    else if (!telemetry_received) {
-      LOG_WRN("No telemetry received yet - retrying enable command");
-      serial_master_send_telemetry_config(true, 100, 0);
-    }
+    state->helios_uptime_ms = response->uptime_ms;
+    LOG_DBG("Ping response received (uptime=%u ms)", state->helios_uptime_ms);
     break;
   }
 
   case HELIOS_MSG_STATE_DATA: {
     helios_data_state_t* data = (helios_data_state_t*)packet->payload;
-    helios_state = data->state;
-    helios_error = data->error;
-    LOG_DBG("State data: state=%u, error=%u", helios_state, helios_error);
+    state->helios_state = data->state;
+    state->helios_error = data->error;
+
+    // Mark that we've received state data (counts as telemetry)
+    if (!state->telemetry_received) {
+      LOG_INF("State data received - telemetry enabled");
+      state->telemetry_received = true;
+    }
+    state->last_telemetry_time = current_micros;
+
+    LOG_DBG("State data: state=%u, error=%u", state->helios_state, state->helios_error);
     break;
   }
 
   case HELIOS_MSG_TELEMETRY_BUNDLE: {
     helios_data_telemetry_bundle_t* bundle = (helios_data_telemetry_bundle_t*)packet->payload;
-    helios_state = bundle->state;
-    helios_error = bundle->error;
+    state->helios_state = bundle->state;
+    state->helios_error = bundle->error;
 
-    // Mark that we've received telemetry
-    if (!telemetry_received) {
+    // Mark that we've received telemetry and update timestamp
+    if (!state->telemetry_received) {
       LOG_INF("Telemetry successfully enabled - receiving bundles");
-      telemetry_received = true;
+      state->telemetry_received = true;
     }
+    state->last_telemetry_time = current_micros;
 
     // Protocol v1.3: Check for emergency stop confirmation
-    if (emergency_stop_active && bundle->state == HELIOS_STATE_E_STOP) {
+    if (state->emergency_stop_active && bundle->state == HELIOS_STATE_E_STOP) {
       LOG_INF("Emergency stop confirmed by Helios - stopping retransmission");
-      emergency_stop_confirmed = true;
-      emergency_stop_active = false;
+      state->emergency_stop_confirmed = true;
+      state->emergency_stop_active = false;
     }
 
     LOG_DBG("Telemetry: state=%u, error=%u, motors=%u, temps=%u", bundle->state,
@@ -208,8 +321,13 @@ static void process_packet(const helios_packet_t* packet)
   }
 }
 
-/* Transmit Packet - Actual UART transmission (called from TX thread) */
-static void transmit_packet(const helios_packet_t* packet)
+/**
+ * Transmit Packet - Actual UART transmission
+ *
+ * Encodes packet and triggers UART ISR to send it.
+ * Called from serial thread.
+ */
+static void fill_transmit_buffer(const helios_packet_t* packet)
 {
   // Lock to prevent concurrent transmission attempts
   k_mutex_lock(&tx_mutex, K_FOREVER);
@@ -234,7 +352,12 @@ static void transmit_packet(const helios_packet_t* packet)
   k_mutex_unlock(&tx_mutex);
 }
 
-/* Queue Packet for Transmission */
+/**
+ * Queue Packet for Transmission
+ *
+ * Queues packet for transmission by serial thread.
+ * Called from public API functions.
+ */
 static void send_packet(const helios_packet_t* packet)
 {
   int ret = k_msgq_put(&tx_packet_queue, packet, K_NO_WAIT);
@@ -243,8 +366,144 @@ static void send_packet(const helios_packet_t* packet)
   }
 }
 
-/* Public API - Send Ping Request */
-void serial_master_send_ping(void)
+//////////////////////////////////////////////////////////////
+// Thread Helper Functions
+//////////////////////////////////////////////////////////////
+
+/**
+ * Process RX Packets
+ *
+ * Drains RX packet queue and processes all pending packets.
+ */
+static void process_rx_packets(struct serial_state* state, uint64_t current_micros)
+{
+  helios_packet_t rx_packet;
+  while (k_msgq_get(&rx_packet_queue, &rx_packet, K_NO_WAIT) == 0) {
+    process_packet(&rx_packet, state, current_micros);
+  }
+}
+
+/**
+ * Process TX Queue
+ *
+ * Processes one packet from TX queue if available.
+ */
+static void process_tx_queue(void)
+{
+  helios_packet_t tx_packet;
+  if (k_msgq_get(&tx_packet_queue, &tx_packet, K_NO_WAIT) == 0) {
+    fill_transmit_buffer(&tx_packet);
+  }
+}
+
+/**
+ * Handle Emergency Stop
+ *
+ * Retransmits emergency stop every 250ms until confirmed.
+ */
+static void handle_emergency_stop(struct serial_state* state, uint64_t current_micros)
+{
+  if (!state->emergency_stop_active || state->emergency_stop_confirmed) {
+    return;
+  }
+
+  const uint64_t micros_since_last = current_micros - state->last_emergency_stop_time;
+  if (micros_since_last < (EMERGENCY_STOP_RETRANSMIT_MS * 1000)) {
+    return;
+  }
+
+  helios_packet_t packet;
+  helios_create_emergency_stop(&packet);
+  fill_transmit_buffer(&packet);
+  state->last_emergency_stop_time = current_micros;
+}
+
+/**
+ * Check Telemetry Timeout
+ *
+ * Resets telemetry state if no telemetry received for 30 seconds.
+ */
+static void check_telemetry_timeout(struct serial_state* state, uint64_t current_micros)
+{
+  if (!state->telemetry_received || state->last_telemetry_time == 0) {
+    return;
+  }
+
+  const uint64_t micros_since_telemetry = current_micros - state->last_telemetry_time;
+  if (micros_since_telemetry > (TELEMETRY_TIMEOUT_MS * 1000)) {
+    LOG_WRN("Telemetry timeout - no telemetry for %d ms, re-enabling", TELEMETRY_TIMEOUT_MS);
+    state->telemetry_received = false;
+    state->last_telemetry_time = 0;
+  }
+}
+
+/**
+ * Handle Telemetry Config
+ *
+ * Sends telemetry config every 500ms until first telemetry received.
+ */
+static void handle_telemetry_config(struct serial_state* state, uint64_t current_micros)
+{
+  if (state->telemetry_received) {
+    return;
+  }
+
+  // On first call (last_time == 0), send immediately
+  if (state->last_telemetry_request_time == 0) {
+    LOG_DBG("Sending initial telemetry config");
+    helios_send_telemetry_config(true, 100, 0);
+    state->last_telemetry_request_time = current_micros;
+    return;
+  }
+
+  const uint64_t micros_since_request = current_micros - state->last_telemetry_request_time;
+  if (micros_since_request < (TELEMETRY_REQUEST_INTERVAL_MS * 1000)) {
+    return;
+  }
+
+  LOG_DBG("Sending telemetry config (waiting for telemetry)");
+  helios_send_telemetry_config(true, 100, 0);
+  state->last_telemetry_request_time = current_micros;
+}
+
+/**
+ * Handle Ping
+ *
+ * Sends periodic ping every 10 seconds to maintain connection.
+ */
+static void handle_ping(struct serial_state* state, uint64_t current_micros)
+{
+  if (!state->telemetry_received) {
+    return; // Don't ping until telemetry is enabled
+  }
+
+  // On first call after telemetry enabled (last_time == 0), send immediately
+  if (state->last_ping_time == 0) {
+    LOG_DBG("Sending initial ping");
+    helios_send_ping();
+    state->last_ping_time = current_micros;
+    return;
+  }
+
+  const uint64_t micros_since_ping = current_micros - state->last_ping_time;
+  if (micros_since_ping < (PING_INTERVAL_MS * 1000)) {
+    return;
+  }
+
+  helios_send_ping();
+  state->last_ping_time = current_micros;
+}
+
+//////////////////////////////////////////////////////////////
+// Public API
+//////////////////////////////////////////////////////////////
+
+/**
+ * Send Ping Request
+ *
+ * Queues a ping request packet for transmission to Helios ICU.
+ */
+void helios_send_ping(void)
 {
   helios_packet_t packet;
   helios_create_ping_request(&packet);
@@ -252,8 +511,16 @@ void serial_master_send_ping(void)
   send_packet(&packet);
 }
 
-/* Public API - Send Telemetry Config Command */
-void serial_master_send_telemetry_config(bool enabled, uint32_t interval_ms,
+/**
+ * Send Telemetry Config Command
+ *
+ * Configures telemetry broadcast settings on Helios ICU (protocol v1.2+).
+ *
+ * @param enabled Enable/disable telemetry broadcasts
+ * @param interval_ms Telemetry broadcast interval (100-5000 ms)
+ * @param mode Telemetry mode (0=bundled, 1=individual)
+ */
+void helios_send_telemetry_config(bool enabled, uint32_t interval_ms,
     uint32_t mode)
 {
   helios_packet_t packet;
@@ -263,8 +530,15 @@ void serial_master_send_telemetry_config(bool enabled, uint32_t interval_ms,
       interval_ms, mode);
 }
 
-/* Public API - Send Set Mode Command */
-void serial_master_set_mode(helios_mode_t mode, uint32_t parameter)
+/**
+ * Send Set Mode Command
+ *
+ * Sends a mode change command to Helios ICU.
+ *
+ * @param mode Operating mode (IDLE, FAN, HEAT, EMERGENCY)
+ * @param parameter Mode-specific parameter (e.g., RPM for FAN, pump rate for HEAT)
+ */
+void helios_set_mode(helios_mode_t mode, uint32_t parameter)
 {
   helios_packet_t packet;
   helios_create_set_mode(&packet, mode, parameter);
@@ -272,26 +546,50 @@ void serial_master_set_mode(helios_mode_t mode, uint32_t parameter)
   LOG_INF("Set mode: mode=%u, parameter=%u", mode, parameter);
 }
 
-/* Public API - Send Emergency Stop Command (Protocol v1.3) */
-void serial_master_send_emergency_stop(void)
+/**
+ * Send Emergency Stop Command
+ *
+ * Initiates emergency stop procedure (protocol v1.3).
+ * Command will be retransmitted every 250ms until confirmed by Helios.
+ */
+void helios_send_emergency_stop(void)
 {
-  emergency_stop_active = true;
-  emergency_stop_confirmed = false;
-  LOG_WRN("Emergency stop initiated - retransmitting every 250ms until confirmed");
+  serial_state.emergency_stop_active = true;
+  serial_state.emergency_stop_confirmed = false;
+  LOG_WRN("Emergency stop initiated - retransmitting every %d ms until confirmed",
+      EMERGENCY_STOP_RETRANSMIT_MS);
 }
 
-/* Public API - Get Helios State */
-void serial_master_get_state(helios_state_t* state, helios_error_t* error)
+/**
+ * Get Helios State
+ *
+ * Returns last known state and error from telemetry.
+ *
+ * @param state Output state (can be NULL)
+ * @param error Output error (can be NULL)
+ */
+void helios_get_state(helios_state_t* state, helios_error_t* error)
 {
   if (state) {
-    *state = helios_state;
+    *state = serial_state.helios_state;
   }
   if (error) {
-    *error = helios_error;
+    *error = serial_state.helios_error;
   }
 }
 
-/* Initialize Serial Master */
+//////////////////////////////////////////////////////////////
+// Initialization
+//////////////////////////////////////////////////////////////
+
+/**
+ * Initialize Serial Master
+ *
+ * Initializes UART device, decoder, and interrupt handlers.
+ * Must be called before starting serial thread.
+ *
+ * @return 0 on success, negative on error
+ */
 int serial_master_init(void)
 {
   // Get UART device
@@ -332,57 +630,16 @@ int serial_master_init(void)
   return 0;
 }
 
-/* TX Thread - Dequeues and transmits packets, handles emergency stop */
-void serial_tx_thread(void)
-{
-  LOG_DBG("Serial TX thread started");
+//////////////////////////////////////////////////////////////
+// Zbus Integration
+//////////////////////////////////////////////////////////////
 
-  // Wait briefly for Helios to initialize
-  k_sleep(K_SECONDS(1));
-
-  while (1) {
-    // Protocol v1.3: Emergency stop retransmission takes priority
-    if (emergency_stop_active && !emergency_stop_confirmed) {
-      helios_packet_t packet;
-      helios_create_emergency_stop(&packet);
-      transmit_packet(&packet);
-      k_sleep(K_MSEC(250));
-      continue;
-    }
-
-    // Try to dequeue a packet with timeout
-    helios_packet_t packet;
-    int ret = k_msgq_get(&tx_packet_queue, &packet, K_SECONDS(10));
-
-    if (ret == 0) {
-      // Packet available - transmit it
-      transmit_packet(&packet);
-    } else {
-      // Timeout - send periodic ping to maintain connection
-      // (Helios timeout is 30s, we ping every 10s)
-      serial_master_send_ping();
-    }
-  }
-}
-
-/* RX Thread - Dequeues and processes received packets */
-void serial_rx_thread(void)
-{
-  LOG_DBG("Serial RX thread started");
-
-  while (1) {
-    helios_packet_t packet;
-
-    // Wait for packet from queue (blocking)
-    int ret = k_msgq_get(&rx_packet_queue, &packet, K_FOREVER);
-    if (ret == 0) {
-      // Process packet in thread context (safe for logging, etc.)
-      process_packet(&packet);
-    }
-  }
-}
-
-/* Zbus Listener - Handles Helios state commands from shell/UI */
+/**
+ * Zbus Listener - Handles Helios state commands from shell/UI
+ *
+ * Listens to helios_state_command_chan and forwards commands
+ * to Helios ICU via serial protocol.
+ */
 static void serial_handler_listener_cb(const struct zbus_channel* chan)
 {
   // Only handle helios_state_command_chan
@@ -393,7 +650,7 @@ static void serial_handler_listener_cb(const struct zbus_channel* chan)
     LOG_INF("Received state command: mode=%u, parameter=%u", cmd->mode, cmd->parameter);
 
     // Send SET_MODE command to Helios via serial protocol
-    serial_master_set_mode(cmd->mode, cmd->parameter);
+    helios_set_mode(cmd->mode, cmd->parameter);
   }
 }
 

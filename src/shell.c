@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-
-#include <slate/shell.h>
-#include <slate/zbus.h>
-#include <slate/serial_master.h>
 #include <stdlib.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+
+#include <slate/serial_handler.h>
+#include <slate/shell.h>
+#include <slate/zbus.h>
 
 LOG_MODULE_REGISTER(slate_shell);
 
@@ -58,7 +59,7 @@ int cmd_get_state(const struct shell* sh, size_t argc, char** argv)
   helios_state_t state;
   helios_error_t error;
 
-  serial_master_get_state(&state, &error);
+  helios_get_state(&state, &error);
 
   shell_print(sh, "Helios State: %s (%d)", helios_state_names[state], state);
 
