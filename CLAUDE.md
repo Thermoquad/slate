@@ -46,21 +46,26 @@
 - ✅ WiFi/networking stack configured
 - ✅ Build system and development workflow
 
+**What's Implemented:**
+- ✅ LVGL display integration with OLED LCD
+- ✅ Helios telemetry display (state, temperature, RPM)
+- ✅ Serial communication with Helios (via Fusain library)
+- ✅ Packet validation to reject corrupted telemetry
+
 **What's Planned:**
-- 🔲 LVGL display integration (OLED LCD driver)
-- 🔲 Helios serial protocol integration (master implementation)
-- 🔲 UI framework (menu system, status display, controls)
+- 🔲 Helios command transmission (full master implementation)
+- 🔲 UI framework (menu system, interactive controls)
 - 🔲 Mode switching (normal vs node mode)
-- 🔲 Threading model (based on Helios patterns)
+- 🔲 Full threading model (currently using display thread only)
 - 🔲 Wireless communication (WiFi/Bluetooth)
 - 🔲 CAN bus messaging
 - 🔲 State management and persistence
 
 **Development Hardware (Prototype):**
-- ✅ OLED LCD display (hardware ready, driver not integrated)
+- ✅ OLED LCD display (SSD1306, I2C, working with LVGL)
 - ✅ Quadrature encoder (working)
 - ✅ Push button (working)
-- ✅ UART1 serial connection to Helios (configured, not used)
+- ✅ UART1 serial connection to Helios (working, receiving telemetry)
 - ✅ MCP2515 CAN bridge (configured, not used)
 
 ---
@@ -716,12 +721,23 @@ minicom -D /dev/ttyACM0 -b 115200
 
 ## Project History
 
-This project is in early prototype stage. Initial development focused on validating input hardware (quadrature encoder and button detection). Future development will add display, serial protocol integration, and multi-mode operation.
+This project has progressed from early prototype to functional telemetry display:
+
+**Completed Milestones:**
+- ✅ Input hardware validation (quadrature encoder, button detection)
+- ✅ LVGL display integration with SSD1306 OLED
+- ✅ Helios serial protocol integration (RX only, via Fusain library)
+- ✅ Telemetry display implementation (state, temperature, RPM)
+- ✅ Packet validation to prevent display corruption
+
+**In Progress:**
+- Full master implementation (command transmission)
+- Interactive UI with menu system
 
 **Development with AI Assistance:**
 All development is documented in this CLAUDE.md file to guide AI assistants. Follow the "ask questions, don't assume" philosophy documented in the organization CLAUDE.md.
 
-**Last Updated:** 2025-01-01
+**Last Updated:** 2026-01-04
 
 ---
 
