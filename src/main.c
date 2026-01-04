@@ -12,7 +12,8 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
-static void test_cb(struct input_event *evt, void *p) {
+static void test_cb(struct input_event* evt, void* p)
+{
   if (evt->code == INPUT_REL_WHEEL) {
     printk("z event %d\n", evt->value);
   }
@@ -27,10 +28,11 @@ static void test_cb(struct input_event *evt, void *p) {
 INPUT_CALLBACK_DEFINE(NULL, test_cb, NULL);
 
 /* Thread Definitions */
-K_THREAD_DEFINE(serial_tx_id, 2048, serial_tx_thread, NULL, NULL, NULL, 6, 0, 0);
-K_THREAD_DEFINE(serial_rx_id, 2048, serial_rx_thread, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(serial_tx_id, CONFIG_MAIN_STACK_SIZE, serial_tx_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(serial_rx_id, CONFIG_MAIN_STACK_SIZE, serial_rx_thread, NULL, NULL, NULL, 5, 0, 0);
 
-int main(void) {
+int main(void)
+{
   LOG_INF("Slate controller starting");
 
   // Initialize serial communication with Helios

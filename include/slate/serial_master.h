@@ -7,7 +7,7 @@
 #ifndef SLATE_SERIAL_MASTER_H
 #define SLATE_SERIAL_MASTER_H
 
-#include <helios_serial/helios_serial.h>
+#include <fusain/fusain.h>
 #include <stdint.h>
 
 /**

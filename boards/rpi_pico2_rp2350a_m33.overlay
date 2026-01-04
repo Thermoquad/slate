@@ -5,17 +5,33 @@
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
 /* Add reverse compatability with Pico */
-pico_i2c0: &i2c0 {};
+pico_i2c0: &i2c0 {
+	status = "okay";
+
+	sh1106_sh1106_128x64: ssd1306@3c {
+		compatible = "sinowealth,sh1106";
+		reg = <0x3c>;
+		width = <128>;
+		height = <64>;
+		segment-offset = <2>;
+		page-offset = <0>;
+		display-offset = <0>;
+		multiplex-ratio = <63>;
+		segment-remap;
+		com-invdir;
+		prechargep = <0x22>;
+	};
+};
 pico_i2c1: &i2c1 {};
 pico_uart1: &uart1 {};
 
 &pinctrl {
 	uart1_default: uart1_default {
 		group1 {
-			pinmux = <UART1_TX_P8>;
+			pinmux = <UART1_TX_P4>;
 		};
 		group2 {
-			pinmux = <UART1_RX_P9>;
+			pinmux = <UART1_RX_P5>;
 			input-enable;
 		};
 	};
