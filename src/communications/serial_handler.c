@@ -759,7 +759,7 @@ static void handle_emergency_stop(struct serial_state* state, uint64_t current_m
   }
 
   helios_packet_t packet;
-  helios_create_emergency_stop(&packet);
+  helios_create_set_mode(&packet, HELIOS_MODE_EMERGENCY, 0);
   fill_transmit_buffer(&packet);
   state->last_emergency_stop_time = current_micros;
 }
