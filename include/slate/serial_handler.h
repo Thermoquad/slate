@@ -49,9 +49,24 @@ void helios_set_mode(helios_mode_t mode, uint32_t parameter);
 void helios_get_state(helios_state_t* state, helios_error_t* error);
 
 /**
- * Serial thread entry point
- * Handles both TX (periodic pings/telemetry config) and RX (packet processing)
+ * Serial RX thread entry point
+ * Handles UART RX polling and packet decoding only
+ * Priority: -2 (highest), Loop: 500µs
  */
-int serial_thread(void);
+int serial_rx_thread(void);
+
+/**
+ * Serial TX thread entry point
+ * Handles UART TX polling and TX queue processing
+ * Priority: 0, Loop: 1ms
+ */
+int serial_tx_thread(void);
+
+/**
+ * Serial processing thread entry point
+ * Handles protocol logic, packet processing, timeouts, and retransmissions
+ * Priority: 1, Loop: 10ms
+ */
+int serial_processing_thread(void);
 
 #endif /* SLATE_SERIAL_MASTER_H */

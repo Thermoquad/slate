@@ -22,7 +22,6 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 ZBUS_LISTENER_DEFINE(display_listener, display_telemetry_callback);
 
-
 //////////////////////////////////////////////////////////////
 // Zbus Channel Definitions
 //////////////////////////////////////////////////////////////
@@ -76,8 +75,10 @@ static void test_cb(struct input_event* evt, void* p)
 INPUT_CALLBACK_DEFINE(NULL, test_cb, NULL);
 
 /* Thread Definitions */
-K_THREAD_DEFINE(serial_id, CONFIG_MAIN_STACK_SIZE, serial_thread, NULL, NULL, NULL, 5, 0, 0);
-K_THREAD_DEFINE(display_id, 8192, display_thread, NULL, NULL, NULL, 4, 0, 0);
+K_THREAD_DEFINE(serial_rx_id, CONFIG_MAIN_STACK_SIZE, serial_rx_thread, NULL, NULL, NULL, -2, 0, 0); // RX: Highest priority - time-critical UART RX polling
+K_THREAD_DEFINE(serial_tx_id, CONFIG_MAIN_STACK_SIZE, serial_tx_thread, NULL, NULL, NULL, 0, 0, 0);  // TX: Priority 0 - UART TX polling and queue processing
+K_THREAD_DEFINE(serial_processing_id, CONFIG_MAIN_STACK_SIZE, serial_processing_thread, NULL, NULL, NULL, 1, 0, 0); // Processing: Priority 1 - protocol logic
+K_THREAD_DEFINE(display_id, 8192, display_thread, NULL, NULL, NULL, 5, 0, 0); // Lower priority - display can wait
 
 int main(void)
 {

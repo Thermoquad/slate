@@ -98,3 +98,37 @@ tasks:
       SERIAL_PORT:
         sh: ls -l /dev/ttyACM* | awk '{print $10}' | gum choose --header "Pick the serial port to connect to:"
     cmd: minicom --baudrate 115200 --device $SERIAL_PORT
+
+  firmware-stats:
+    desc: Display firmware memory usage statistics
+    preconditions:
+      - test -f build/zephyr/zephyr.elf
+      - test -f build/zephyr/zephyr.map
+    silent: true
+    cmds:
+      - |
+        echo "Memory region         Used Size  Region Size  %age Used"
+
+        # Get section sizes from ELF
+        SIZE_OUTPUT=$(../../tools/zephyr-sdk-0.17.4/arm-zephyr-eabi/bin/arm-zephyr-eabi-size build/zephyr/zephyr.elf)
+        TEXT=$(echo "$SIZE_OUTPUT" | awk 'NR==2 {print $1}')
+        DATA=$(echo "$SIZE_OUTPUT" | awk 'NR==2 {print $2}')
+        BSS=$(echo "$SIZE_OUTPUT" | awk 'NR==2 {print $3}')
+
+        # Calculate used sizes
+        FLASH_USED=$((TEXT + DATA))
+        RAM_USED=$((DATA + BSS))
+
+        # Get memory region sizes from map file
+        FLASH_SIZE=$(grep "^FLASH" build/zephyr/zephyr.map | awk '{print strtonum($3)}')
+        RAM_SIZE=$(grep "^RAM" build/zephyr/zephyr.map | awk '{print strtonum($3)}')
+        IDT_SIZE=$(grep "^IDT_LIST" build/zephyr/zephyr.map | awk '{print strtonum($3)}')
+
+        # Calculate percentages
+        FLASH_PCT=$(awk "BEGIN {printf \"%.2f\", ($FLASH_USED / $FLASH_SIZE) * 100}")
+        RAM_PCT=$(awk "BEGIN {printf \"%.2f\", ($RAM_USED / $RAM_SIZE) * 100}")
+
+        # Format output
+        printf "%15s: %12s %13s %11s\n" "FLASH" "$FLASH_USED B" "4 MB" "$FLASH_PCT%"
+        printf "%15s: %12s %13s %11s\n" "RAM" "$RAM_USED B" "520 KB" "$RAM_PCT%"
+        printf "%15s: %12s %13s %11s\n" "IDT_LIST" "0 B" "32 KB" "0.00%"
