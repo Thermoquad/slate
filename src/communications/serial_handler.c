@@ -72,9 +72,8 @@ static helios_decoder_t decoder;
 static uint8_t tx_buffer[HELIOS_MAX_PACKET_SIZE * 2]; // 2x for stuffing overhead
 static size_t tx_index = 0;
 static size_t tx_length = 0;
-K_MUTEX_DEFINE(tx_mutex); // Protects TX buffer and state
 
-/* TX Packet Queue - API pushes, thread pops and transmits */
+/* TX Packet Queue - API pushes, thread pops */
 K_MSGQ_DEFINE(tx_packet_queue, sizeof(helios_packet_t), 8, 4);
 
 /* RX Packet Queue - ISR pushes, thread pops */
@@ -241,18 +240,12 @@ int serial_tx_thread(void)
   k_sleep(K_MSEC(100));
 
   while (1) {
-    const uint64_t current_micros = k_cyc_to_us_floor64(k_cycle_get_64());
-
     // Poll UART for TX readiness and send queued data
     poll_uart_tx();
 
     // Process one pending TX packet if available (pops from queue, fills buffer)
     process_tx_queue();
-
-    // Handle periodic pings (generates packets, puts in TX queue)
-    handle_ping(&serial_state, current_micros);
-
-    k_sleep(K_MSEC(1));  // TX thread can run slower (1ms)
+    k_sleep(K_MSEC(1)); // TX thread can run slower (1ms)
   }
 }
 
@@ -283,13 +276,16 @@ int serial_processing_thread(void)
     // Handle emergency stop (priority - retransmits every 250ms)
     handle_emergency_stop(&serial_state, current_micros);
 
+    // Handle periodic pings (generates packets, puts in TX queue)
+    handle_ping(&serial_state, current_micros);
+
     // Check telemetry timeout (30s)
     check_telemetry_timeout(&serial_state, current_micros);
 
     // Handle telemetry config requests (sends until first telemetry received)
     handle_telemetry_config(&serial_state, current_micros);
 
-    k_sleep(K_MSEC(10));  // Processing thread runs at 10ms
+    k_sleep(K_MSEC(10)); // Processing thread runs at 10ms
   }
 }
 
@@ -697,14 +693,10 @@ static void process_tx_queue(void)
  */
 static void fill_transmit_buffer(const helios_packet_t* packet)
 {
-  // Lock to prevent concurrent transmission attempts
-  k_mutex_lock(&tx_mutex, K_FOREVER);
-
   // Encode packet to buffer
   int len = helios_encode_packet(packet, tx_buffer, sizeof(tx_buffer));
   if (len < 0) {
     LOG_ERR("Encoding failed: %d", len);
-    k_mutex_unlock(&tx_mutex);
     return;
   }
 
@@ -713,10 +705,6 @@ static void fill_transmit_buffer(const helios_packet_t* packet)
   tx_length = (size_t)len;
 
   LOG_DBG("Starting TX: type=0x%02X, %zu bytes", packet->msg_type, tx_length);
-
-  // Note: No interrupt to enable - polling loop will send the data
-
-  k_mutex_unlock(&tx_mutex);
 }
 
 /**
