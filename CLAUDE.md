@@ -371,11 +371,13 @@ CONFIG_DEBUG_COREDUMP_BACKEND_LOGGING=y
 
 ### 2. Helios Serial Protocol Integration
 
-**Library:** `modules/lib/helios_serial` (already exists)
+**Library:** `modules/lib/fusain` (Fusain Protocol implementation)
+
+**Protocol Documentation:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
 
 **Integration Steps:**
-1. Add helios_serial module to CMakeLists.txt (like Helios app does)
-2. Enable `CONFIG_HELIOS_SERIAL=y`
+1. Add fusain module to CMakeLists.txt (like Helios app does)
+2. Enable `CONFIG_FUSAIN=y`
 3. Implement master-side serial handler in `src/communications/`
 4. Create TX thread for command sending
 5. Create RX thread for telemetry reception
@@ -564,11 +566,13 @@ minicom -D /dev/ttyACM0 -b 115200
 
 ### Adding Helios Serial Protocol
 
-1. Add helios_serial module to CMakeLists.txt:
+**Protocol Documentation:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+
+1. Add fusain module to CMakeLists.txt:
    ```cmake
-   list(APPEND EXTRA_ZEPHYR_MODULES ${CMAKE_CURRENT_SOURCE_DIR}/../../modules/lib/helios_serial)
+   list(APPEND EXTRA_ZEPHYR_MODULES ${CMAKE_CURRENT_SOURCE_DIR}/../../modules/lib/fusain)
    ```
-2. Enable in prj.conf: `CONFIG_HELIOS_SERIAL=y`
+2. Enable in prj.conf: `CONFIG_FUSAIN=y`
 3. Create `src/communications/serial_master.c`
 4. Implement command sending functions
 5. Implement telemetry parsing
@@ -610,17 +614,19 @@ minicom -D /dev/ttyACM0 -b 115200
 - Slate sends commands, Helios executes them
 - Slate monitors telemetry, Helios generates it
 
-### Helios Serial Protocol (modules/lib/helios_serial/)
+### Fusain Protocol Library (modules/lib/fusain/)
 
-**Relationship:** Slate will use this library as the master
+**Relationship:** Slate uses this library as the master controller
 
 **Integration:**
-- Link helios_serial module via CMake
+- Link fusain module via CMake
 - Implement master-side command encoding
 - Implement telemetry decoding
 - Handle CRC validation and error recovery
 
-**Reference:** See `modules/lib/helios_serial/CLAUDE.md` for protocol details
+**Protocol Specification:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+
+**Library Documentation:** `../../modules/lib/fusain/CLAUDE.md`
 
 ---
 
