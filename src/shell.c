@@ -12,6 +12,27 @@ LOG_MODULE_REGISTER(slate_shell);
 
 #define PUB_TIMEOUT K_SECONDS(1)
 
+// State names for display
+static const char* const fusain_state_names[] = {
+  "INIT",    // FUSAIN_STATE_INITIALIZING
+  "IDLE",    // FUSAIN_STATE_IDLE
+  "BLOWING", // FUSAIN_STATE_BLOWING
+  "PREHEAT", // FUSAIN_STATE_PREHEAT
+  "PRE_ST2", // FUSAIN_STATE_PREHEAT_STAGE_2
+  "HEATING", // FUSAIN_STATE_HEATING
+  "COOLING", // FUSAIN_STATE_COOLING
+  "ERROR",   // FUSAIN_STATE_ERROR
+  "E_STOP",  // FUSAIN_STATE_E_STOP
+};
+
+// Mode names for display
+static const char* const fusain_mode_names[] = {
+  "IDLE",      // FUSAIN_MODE_IDLE
+  "FAN",       // FUSAIN_MODE_FAN
+  "HEAT",      // FUSAIN_MODE_HEAT
+  [255] = "EMERGENCY", // FUSAIN_MODE_EMERGENCY
+};
+
 //////////////////////////////////////////////////////////////
 // Helper Functions
 //////////////////////////////////////////////////////////////
@@ -23,7 +44,7 @@ LOG_MODULE_REGISTER(slate_shell);
  * @param cmd Command message to send
  * @return 0 on success, negative error code on failure
  */
-static int send_state_command(const struct shell* sh, helios_state_command_msg_t* cmd)
+static int send_state_command(const struct shell* sh, fusain_state_command_msg_t* cmd)
 {
   int ret = zbus_chan_pub(&helios_state_command_chan, cmd, PUB_TIMEOUT);
   if (ret != 0) {
@@ -33,7 +54,7 @@ static int send_state_command(const struct shell* sh, helios_state_command_msg_t
   }
 
   shell_print(sh, "Sending %s command to Helios (parameter: %u)",
-      helios_mode_names[cmd->mode], cmd->parameter);
+      fusain_mode_names[cmd->mode], cmd->parameter);
   return 0;
 }
 
@@ -56,14 +77,14 @@ int cmd_get_state(const struct shell* sh, size_t argc, char** argv)
   ARG_UNUSED(argc);
   ARG_UNUSED(argv);
 
-  helios_state_t state;
-  helios_error_t error;
+  fusain_state_t state;
+  fusain_error_t error;
 
   helios_get_state(&state, &error);
 
-  shell_print(sh, "Helios State: %s (%d)", helios_state_names[state], state);
+  shell_print(sh, "Helios State: %s (%d)", fusain_state_names[state], state);
 
-  if (error != HELIOS_ERROR_NONE) {
+  if (error != FUSAIN_ERROR_NONE) {
     shell_print(sh, "Helios Error: %d", error);
   }
 
@@ -75,8 +96,8 @@ int cmd_set_idle(const struct shell* sh, size_t argc, char** argv)
   ARG_UNUSED(argc);
   ARG_UNUSED(argv);
 
-  helios_state_command_msg_t cmd = {
-    .mode = HELIOS_MODE_IDLE,
+  fusain_state_command_msg_t cmd = {
+    .mode = FUSAIN_MODE_IDLE,
     .parameter = 0,
   };
 
@@ -96,8 +117,8 @@ int cmd_set_fan(const struct shell* sh, size_t argc, char** argv)
     return -EINVAL;
   }
 
-  helios_state_command_msg_t cmd = {
-    .mode = HELIOS_MODE_FAN,
+  fusain_state_command_msg_t cmd = {
+    .mode = FUSAIN_MODE_FAN,
     .parameter = (uint32_t)rpm,
   };
 
@@ -117,8 +138,8 @@ int cmd_set_heat(const struct shell* sh, size_t argc, char** argv)
     return -EINVAL;
   }
 
-  helios_state_command_msg_t cmd = {
-    .mode = HELIOS_MODE_HEAT,
+  fusain_state_command_msg_t cmd = {
+    .mode = FUSAIN_MODE_HEAT,
     .parameter = (uint32_t)pump_rate,
   };
 

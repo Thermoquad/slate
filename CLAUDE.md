@@ -29,7 +29,7 @@
 
 **Communication:**
 - **Master Role:** Sends commands to Helios ICU (slave)
-- **Protocol:** Helios serial protocol (via helios_serial module)
+- **Protocol:** Fusain protocol (via fusain module)
 - **Transports:** UART, WiFi, Bluetooth, CAN bus (depending on mode)
 
 ---
@@ -373,7 +373,11 @@ CONFIG_DEBUG_COREDUMP_BACKEND_LOGGING=y
 
 **Library:** `modules/lib/fusain` (Fusain Protocol implementation)
 
-**Protocol Documentation:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+**Protocol Specification:** `../../origin/documentation/source/specifications/fusain/` (Sphinx docs)
+
+**Reference Implementations:**
+- **C:** `../../modules/lib/fusain/` - Embedded C library (used by Slate)
+- **Go:** `../../tools/heliostat/pkg/fusain/` - Reference Go implementation
 
 **Integration Steps:**
 1. Add fusain module to CMakeLists.txt (like Helios app does)
@@ -566,7 +570,7 @@ minicom -D /dev/ttyACM0 -b 115200
 
 ### Adding Helios Serial Protocol
 
-**Protocol Documentation:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+**Protocol Specification:** `../../origin/documentation/source/specifications/fusain/` (Sphinx docs)
 
 1. Add fusain module to CMakeLists.txt:
    ```cmake
@@ -604,7 +608,7 @@ minicom -D /dev/ttyACM0 -b 115200
 **Relationship:** Slate is the master controller, Helios is the slave ICU
 
 **Shared Components:**
-- helios_serial protocol library
+- Fusain protocol library
 - Build conventions (Taskfile, clang-format)
 - Threading patterns (K_THREAD_DEFINE, Zbus)
 - Code style and documentation standards
@@ -624,7 +628,11 @@ minicom -D /dev/ttyACM0 -b 115200
 - Implement telemetry decoding
 - Handle CRC validation and error recovery
 
-**Protocol Specification:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+**Protocol Specification:** `../../origin/documentation/source/specifications/fusain/` (Sphinx docs)
+
+**Reference Implementations:**
+- **C:** `../../modules/lib/fusain/` - Embedded C library
+- **Go:** `../../tools/heliostat/pkg/fusain/` - Reference Go implementation
 
 **Library Documentation:** `../../modules/lib/fusain/CLAUDE.md`
 
@@ -659,7 +667,7 @@ minicom -D /dev/ttyACM0 -b 115200
 
 - **Missing CONFIG_***: Add to `prj.conf`
 - **Device tree errors**: Check board overlay syntax
-- **Module not found**: Verify helios_serial path in CMakeLists.txt
+- **Module not found**: Verify fusain path in CMakeLists.txt
 
 ### Runtime Issues
 
@@ -721,7 +729,8 @@ minicom -D /dev/ttyACM0 -b 115200
 ### Project Documentation
 - **Organization:** `../../CLAUDE.md` - Thermoquad organization conventions
 - **Helios ICU:** `../helios/CLAUDE.md` - Slave ICU firmware reference
-- **Helios Serial:** `../../modules/lib/helios_serial/CLAUDE.md` - Protocol library
+- **Fusain Library:** `../../modules/lib/fusain/CLAUDE.md` - C protocol library
+- **Fusain Specification:** `../../origin/documentation/source/specifications/fusain/` - Protocol specification (Sphinx docs)
 
 ---
 
@@ -743,7 +752,13 @@ This project has progressed from early prototype to functional telemetry display
 **Development with AI Assistance:**
 All development is documented in this CLAUDE.md file to guide AI assistants. Follow the "ask questions, don't assume" philosophy documented in the organization CLAUDE.md.
 
-**Last Updated:** 2026-01-04
+**Last Updated:** 2026-01-09
+
+---
+
+## AI Assistant Operations
+
+To reload all organization CLAUDE.md files or run a content integrity check, see the **CLAUDE.md Reload** and **Content Integrity Check** sections in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
 
 ---
 

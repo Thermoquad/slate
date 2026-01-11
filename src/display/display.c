@@ -11,6 +11,19 @@
 
 LOG_MODULE_REGISTER(display);
 
+// State names for display
+static const char* const fusain_state_names[] = {
+  "INIT",    // FUSAIN_STATE_INITIALIZING
+  "IDLE",    // FUSAIN_STATE_IDLE
+  "BLOWING", // FUSAIN_STATE_BLOWING
+  "PREHEAT", // FUSAIN_STATE_PREHEAT
+  "PRE_ST2", // FUSAIN_STATE_PREHEAT_STAGE_2
+  "HEATING", // FUSAIN_STATE_HEATING
+  "COOLING", // FUSAIN_STATE_COOLING
+  "ERROR",   // FUSAIN_STATE_ERROR
+  "E_STOP",  // FUSAIN_STATE_E_STOP
+};
+
 // Custom icon font (1bpp, Font Awesome icons)
 LV_FONT_DECLARE(icons_font);
 #define ICON_FAN "\xEF\xA1\xA3" // UTF-8 encoding of U+F863 (fan)
@@ -52,6 +65,9 @@ void display_telemetry_callback(const struct zbus_channel* chan)
   shared_telemetry.motor_target_rpm = msg->motor_target_rpm;
   shared_telemetry.valid = msg->valid;
   k_mutex_unlock(&telemetry_mutex);
+
+  LOG_DBG("Telemetry received: state=%d, temp=%.1f, rpm=%d",
+      msg->state, msg->temperature, msg->motor_rpm);
 }
 
 static void create_home_screen(lv_obj_t** state_label, lv_obj_t** temp_label, lv_obj_t** rpm_label,
@@ -149,13 +165,13 @@ static void update_display(lv_obj_t* state_label, lv_obj_t* temp_label, lv_obj_t
   t.valid = shared_telemetry.valid;
   k_mutex_unlock(&telemetry_mutex);
 
-  if (t.valid && t.state <= HELIOS_STATE_E_STOP) {
+  if (t.valid && t.state <= FUSAIN_STATE_E_STOP) {
     // Clear buffers before formatting to prevent artifacts
     memset(state_buf, 0, sizeof(state_buf));
     memset(temp_buf, 0, sizeof(temp_buf));
     memset(rpm_buf, 0, sizeof(rpm_buf));
 
-    snprintf(state_buf, sizeof(state_buf), "%s", helios_state_names[t.state]);
+    snprintf(state_buf, sizeof(state_buf), "%s", fusain_state_names[t.state]);
     // Use leading space for separation from icon
     snprintf(temp_buf, sizeof(temp_buf), " %.1fC", t.temperature);
     snprintf(rpm_buf, sizeof(rpm_buf), " %4d", t.motor_rpm);

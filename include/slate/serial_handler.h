@@ -23,22 +23,20 @@ int serial_master_init(void);
 void helios_send_ping(void);
 
 /**
- * Send telemetry config command to Helios ICU (protocol v1.2)
+ * Send telemetry config command to Helios ICU
  *
  * @param enabled Enable/disable telemetry broadcasts
  * @param interval_ms Telemetry broadcast interval (100-5000 ms)
- * @param mode Telemetry mode (0=bundled, 1=individual)
  */
-void helios_send_telemetry_config(bool enabled, uint32_t interval_ms,
-    uint32_t mode);
+void helios_send_telemetry_config(bool enabled, uint32_t interval_ms);
 
 /**
- * Send set mode command to Helios ICU
+ * Send state command to Helios ICU
  *
  * @param mode Operating mode
  * @param parameter Mode-specific parameter (e.g., pump rate for heating)
  */
-void helios_set_mode(helios_mode_t mode, uint32_t parameter);
+void helios_set_mode(fusain_mode_t mode, uint32_t parameter);
 
 /**
  * Get last known Helios state
@@ -46,7 +44,7 @@ void helios_set_mode(helios_mode_t mode, uint32_t parameter);
  * @param state Output state (can be NULL)
  * @param error Output error (can be NULL)
  */
-void helios_get_state(helios_state_t* state, helios_error_t* error);
+void helios_get_state(fusain_state_t* state, fusain_error_t* error);
 
 /**
  * Serial RX thread entry point

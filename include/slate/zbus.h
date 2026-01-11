@@ -13,7 +13,7 @@
  * and the serial handler for controlling the remote Helios ICU.
  *
  * Message structures are defined in fusain/fusain.h:
- * - helios_state_command_msg_t
+ * - fusain_state_command_msg_t
  */
 
 //////////////////////////////////////////////////////////////
@@ -26,8 +26,8 @@
  * Published by serial handler when telemetry is received from Helios ICU
  */
 typedef struct {
-	helios_state_t state;
-	helios_error_t error;
+	fusain_state_t state;
+	fusain_error_t error;
 	double temperature;
 	int32_t motor_rpm;
 	int32_t motor_target_rpm;
@@ -41,7 +41,7 @@ typedef struct {
 /**
  * Helios state command channel
  *
- * Message type: helios_state_command_msg_t
+ * Message type: fusain_state_command_msg_t
  * Publishers: Shell commands
  * Subscribers: Serial handler
  */

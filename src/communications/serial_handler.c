@@ -12,6 +12,8 @@
 //////////////////////////////////////////////////////////////
 
 #include <fusain/fusain.h>
+#include <fusain_cbor_decode.h>
+#include <fusain_cbor_types.h>
 #include <slate/serial_handler.h>
 #include <slate/zbus.h>
 #include <zephyr/device.h>
@@ -49,9 +51,14 @@ struct serial_state {
   uint64_t last_emergency_stop_time;
 
   // Helios state (from telemetry)
-  helios_state_t helios_state;
-  helios_error_t helios_error;
+  fusain_state_t helios_state;
+  fusain_error_t helios_error;
   uint32_t helios_uptime_ms;
+
+  // Telemetry values (from individual messages)
+  double temperature;
+  int32_t motor_rpm;
+  int32_t motor_target_rpm;
 
   // Ping tracking
   bool ping_response_received;
@@ -66,30 +73,46 @@ struct serial_state {
 static const struct device* uart_dev;
 
 /* Decoder State */
-static helios_decoder_t decoder;
+static fusain_decoder_t decoder;
 
 /* TX Buffer and State */
-static uint8_t tx_buffer[HELIOS_MAX_PACKET_SIZE * 2]; // 2x for stuffing overhead
+static uint8_t tx_buffer[FUSAIN_MAX_PACKET_SIZE * 2]; // 2x for stuffing overhead
 static size_t tx_index = 0;
 static size_t tx_length = 0;
 
 /* TX Packet Queue - API pushes, thread pops */
-K_MSGQ_DEFINE(tx_packet_queue, sizeof(helios_packet_t), 8, 4);
+K_MSGQ_DEFINE(tx_packet_queue, sizeof(fusain_packet_t), 8, 4);
 
 /* RX Packet Queue - ISR pushes, thread pops */
-K_MSGQ_DEFINE(rx_packet_queue, sizeof(helios_packet_t), 8, 4);
+K_MSGQ_DEFINE(rx_packet_queue, sizeof(fusain_packet_t), 8, 4);
 
 /* Serial State */
 static struct serial_state serial_state;
 
 //////////////////////////////////////////////////////////////
+// CBOR Helper
+//////////////////////////////////////////////////////////////
+
+/**
+ * Get CBOR message header length based on msg_type
+ *
+ * CBOR wire format: [0x82, msg_type, payload_map]
+ * - msg_type 0x00-0x17: header is [0x82, type] = 2 bytes
+ * - msg_type 0x18-0xFF: header is [0x82, 0x18, type] = 3 bytes
+ */
+static inline size_t cbor_header_len(uint8_t msg_type)
+{
+  return (msg_type <= 0x17) ? 2 : 3;
+}
+
+//////////////////////////////////////////////////////////////
 // Forward Declarations
 //////////////////////////////////////////////////////////////
 
-static void process_packet(const helios_packet_t* packet, struct serial_state* state,
+static void process_packet(const fusain_packet_t* packet, struct serial_state* state,
     uint64_t current_micros);
-static void send_packet(const helios_packet_t* packet);
-static void fill_transmit_buffer(const helios_packet_t* packet);
+static void send_packet(const fusain_packet_t* packet);
+static void fill_transmit_buffer(const fusain_packet_t* packet);
 static void poll_uart_rx(void);
 static void poll_uart_tx(void);
 static void process_rx_packets(struct serial_state* state, uint64_t current_micros);
@@ -110,8 +133,8 @@ static void handle_ping(struct serial_state* state, uint64_t current_micros);
  */
 void helios_send_ping(void)
 {
-  helios_packet_t packet;
-  helios_create_ping_request(&packet);
+  fusain_packet_t packet;
+  fusain_create_ping_request(&packet, 0); // Broadcast address
   LOG_DBG(">>> SENDING PING REQUEST to Helios");
   send_packet(&packet);
 }
@@ -119,34 +142,31 @@ void helios_send_ping(void)
 /**
  * Send Telemetry Config Command
  *
- * Configures telemetry broadcast settings on Helios ICU (protocol v1.2+).
+ * Configures telemetry broadcast settings on Helios ICU.
  *
  * @param enabled Enable/disable telemetry broadcasts
  * @param interval_ms Telemetry broadcast interval (100-5000 ms)
- * @param mode Telemetry mode (0=bundled, 1=individual)
  */
-void helios_send_telemetry_config(bool enabled, uint32_t interval_ms,
-    uint32_t mode)
+void helios_send_telemetry_config(bool enabled, uint32_t interval_ms)
 {
-  helios_packet_t packet;
-  helios_create_telemetry_config(&packet, enabled, interval_ms, mode);
+  fusain_packet_t packet;
+  fusain_create_telemetry_config(&packet, 0, enabled, interval_ms); // Broadcast address
   send_packet(&packet);
-  LOG_DBG("Telemetry config: enabled=%d, interval=%u ms, mode=%u", enabled,
-      interval_ms, mode);
+  LOG_DBG("Telemetry config: enabled=%d, interval=%u ms", enabled, interval_ms);
 }
 
 /**
- * Send Set Mode Command
+ * Send State Command
  *
  * Sends a mode change command to Helios ICU.
  *
  * @param mode Operating mode (IDLE, FAN, HEAT, EMERGENCY)
  * @param parameter Mode-specific parameter (e.g., RPM for FAN, pump rate for HEAT)
  */
-void helios_set_mode(helios_mode_t mode, uint32_t parameter)
+void helios_set_mode(fusain_mode_t mode, uint32_t parameter)
 {
-  helios_packet_t packet;
-  helios_create_set_mode(&packet, mode, parameter);
+  fusain_packet_t packet;
+  fusain_create_state_command(&packet, 0, mode, parameter); // Broadcast address
   send_packet(&packet);
   LOG_DBG("Set mode: mode=%u, parameter=%u", mode, parameter);
 }
@@ -154,7 +174,7 @@ void helios_set_mode(helios_mode_t mode, uint32_t parameter)
 /**
  * Send Emergency Stop Command
  *
- * Initiates emergency stop procedure (protocol v1.3).
+ * Initiates emergency stop procedure.
  * Command will be retransmitted every 250ms until confirmed by Helios.
  */
 void helios_send_emergency_stop(void)
@@ -173,7 +193,7 @@ void helios_send_emergency_stop(void)
  * @param state Output state (can be NULL)
  * @param error Output error (can be NULL)
  */
-void helios_get_state(helios_state_t* state, helios_error_t* error)
+void helios_get_state(fusain_state_t* state, fusain_error_t* error)
 {
   if (state) {
     *state = serial_state.helios_state;
@@ -212,9 +232,12 @@ int serial_rx_thread(void)
   serial_state.emergency_stop_active = false;
   serial_state.emergency_stop_confirmed = false;
   serial_state.last_emergency_stop_time = 0;
-  serial_state.helios_state = HELIOS_STATE_INITIALIZING;
-  serial_state.helios_error = HELIOS_ERROR_NONE;
+  serial_state.helios_state = FUSAIN_STATE_INITIALIZING;
+  serial_state.helios_error = FUSAIN_ERROR_NONE;
   serial_state.helios_uptime_ms = 0;
+  serial_state.temperature = 0.0;
+  serial_state.motor_rpm = 0;
+  serial_state.motor_target_rpm = 0;
   serial_state.ping_response_received = false;
   serial_state.last_ping_time = 0;
 
@@ -313,7 +336,7 @@ int serial_master_init(void)
   LOG_DBG("UART device ready: %s", uart_dev->name);
 
   // Initialize decoder
-  helios_reset_decoder(&decoder);
+  fusain_reset_decoder(&decoder);
   LOG_DBG("Decoder initialized");
 
   // Flush any pending RX data using polling
@@ -349,15 +372,15 @@ static void poll_uart_rx(void)
 
   while (max_bytes-- > 0 && uart_poll_in(uart_dev, &byte) == 0) {
     bytes_read_count++;
-    helios_packet_t packet;
+    fusain_packet_t packet;
 
     // Save state BEFORE decoding for diagnostics
     uint8_t prev_state = decoder.state;
     size_t prev_index = decoder.buffer_index;
 
-    helios_decode_result_t result = helios_decode_byte(byte, &packet, &decoder);
+    fusain_decode_result_t result = fusain_decode_byte(byte, &packet, &decoder);
 
-    if (result == HELIOS_DECODE_OK) {
+    if (result == FUSAIN_DECODE_OK) {
       packets_decoded_count++;
       LOG_DBG("RX: Packet decoded type=0x%02X (total: %u packets, %u bytes)",
           packet.msg_type, packets_decoded_count, bytes_read_count);
@@ -368,7 +391,7 @@ static void poll_uart_rx(void)
         // Queue full - drop packet and log error
         LOG_ERR("RX queue full, dropping packet type 0x%02X", packet.msg_type);
       }
-    } else if (result != HELIOS_DECODE_INCOMPLETE) {
+    } else if (result != FUSAIN_DECODE_INCOMPLETE) {
       // Decode error - reset decoder and continue
       LOG_ERR("DECODE ERROR: result=%d, last_byte=0x%02X",
           result, byte);
@@ -393,7 +416,7 @@ static void poll_uart_rx(void)
         }
       }
 
-      helios_reset_decoder(&decoder);
+      fusain_reset_decoder(&decoder);
     }
   }
 }
@@ -425,30 +448,75 @@ static void poll_uart_tx(void)
 //////////////////////////////////////////////////////////////
 
 /**
+ * Publish telemetry to Zbus
+ *
+ * Publishes collected telemetry data to the Zbus channel.
+ * Called when we have enough data to send a meaningful update.
+ */
+static void publish_telemetry(struct serial_state* state)
+{
+  helios_telemetry_msg_t telemetry_msg = {
+    .state = state->helios_state,
+    .error = state->helios_error,
+    .temperature = state->temperature,
+    .motor_rpm = state->motor_rpm,
+    .motor_target_rpm = state->motor_target_rpm,
+    .valid = true
+  };
+
+  int ret = zbus_chan_pub(&helios_telemetry_chan, &telemetry_msg, PUB_TIMEOUT);
+  if (ret != 0) {
+    LOG_WRN("Failed to publish telemetry to Zbus: %d", ret);
+  }
+
+  LOG_DBG("Telemetry published: state=%d, temp=%.1f, rpm=%d",
+      telemetry_msg.state, telemetry_msg.temperature, telemetry_msg.motor_rpm);
+}
+
+/**
  * Process Received Packet
  *
  * Called from serial thread to process packets queued by UART ISR.
- * Handles ping responses, telemetry, state data, and error messages.
+ * Handles ping responses, state data, motor data, temperature data, and error messages.
  */
-static void process_packet(const helios_packet_t* packet, struct serial_state* state,
+static void process_packet(const fusain_packet_t* packet, struct serial_state* state,
     uint64_t current_micros)
 {
   LOG_DBG("Processing packet: type=0x%02X, length=%u", packet->msg_type,
       packet->length);
 
   switch (packet->msg_type) {
-  case HELIOS_MSG_PING_RESPONSE: {
-    helios_data_ping_response_t* response = (helios_data_ping_response_t*)packet->payload;
-    state->helios_uptime_ms = response->uptime_ms;
+  case FUSAIN_MSG_PING_RESPONSE: {
+    struct ping_response_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_ping_response_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode PING_RESPONSE: %d", ret);
+      break;
+    }
+    state->helios_uptime_ms = decoded.ping_response_payload_timestamp_m;
     state->ping_response_received = true;
     LOG_DBG("Ping response received (uptime=%u ms)", state->helios_uptime_ms);
     break;
   }
 
-  case HELIOS_MSG_STATE_DATA: {
-    helios_data_state_t* data = (helios_data_state_t*)packet->payload;
-    state->helios_state = data->state;
-    state->helios_error = data->error;
+  case FUSAIN_MSG_STATE_DATA: {
+    struct state_data_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_state_data_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode STATE_DATA: %d", ret);
+      break;
+    }
+
+    state->helios_state = (fusain_state_t)decoded.state_data_payload_state_m;
+    state->helios_error = (fusain_error_t)decoded.state_data_payload_error_code_m;
+    LOG_DBG("STATE_DATA: state=%u, error=%u",
+        decoded.state_data_payload_state_m, decoded.state_data_payload_error_code_m);
 
     // Mark that we've received state data (counts as telemetry)
     if (!state->telemetry_received) {
@@ -457,199 +525,121 @@ static void process_packet(const helios_packet_t* packet, struct serial_state* s
     }
     state->last_telemetry_time = current_micros;
 
-    LOG_DBG("State data: state=%u, error=%u", state->helios_state, state->helios_error);
-    break;
-  }
-
-  case HELIOS_MSG_TELEMETRY_BUNDLE: {
-    helios_data_telemetry_bundle_t* bundle = (helios_data_telemetry_bundle_t*)packet->payload;
-
-    state->helios_state = bundle->state;
-    state->helios_error = bundle->error;
-
-    // Mark that we've received telemetry and update timestamp
-    if (!state->telemetry_received) {
-      LOG_INF("Telemetry successfully enabled - receiving bundles");
-      state->telemetry_received = true;
-    }
-    state->last_telemetry_time = current_micros;
-
-    // Protocol v1.3: Check for emergency stop confirmation
-    if (state->emergency_stop_active && bundle->state == HELIOS_STATE_E_STOP) {
+    // Check for emergency stop confirmation
+    if (state->emergency_stop_active && decoded.state_data_payload_state_m == FUSAIN_STATE_E_STOP) {
       LOG_INF("Emergency stop confirmed by Helios - stopping retransmission");
       state->emergency_stop_confirmed = true;
       state->emergency_stop_active = false;
     }
 
-    LOG_DBG("Telemetry: state=%u, error=%u, motors=%u, temps=%u", bundle->state,
-        bundle->error, bundle->motor_count, bundle->temp_count);
+    LOG_DBG("State data: state=%u, error=%u", decoded.state_data_payload_state_m,
+        decoded.state_data_payload_error_code_m);
 
-    // Validate packet counts to prevent buffer overruns
-    if (bundle->motor_count > 10 || bundle->temp_count > 10) {
-      LOG_ERR("Corrupted telemetry packet: motor_count=%u, temp_count=%u (max 10 each)",
-          bundle->motor_count, bundle->temp_count);
-      LOG_ERR("Packet details: msg_type=0x%02X, length=%u, CRC=0x%04X",
-          packet->msg_type, packet->length, packet->crc);
-      LOG_ERR("Bundle header: state=%u, error=%u", bundle->state, bundle->error);
-      LOG_ERR("Expected header size: %zu bytes", sizeof(helios_data_telemetry_bundle_t));
+    // Publish updated telemetry
+    publish_telemetry(state);
+    break;
+  }
 
-      // Hexdump first 32 bytes of payload to see what we actually received
-      LOG_ERR("Payload hexdump (first 32 bytes):");
-      for (size_t i = 0; i < 32 && i < packet->length; i += 8) {
-        LOG_ERR("  [%02zu]: %02X %02X %02X %02X %02X %02X %02X %02X",
-            i,
-            i + 0 < packet->length ? packet->payload[i + 0] : 0,
-            i + 1 < packet->length ? packet->payload[i + 1] : 0,
-            i + 2 < packet->length ? packet->payload[i + 2] : 0,
-            i + 3 < packet->length ? packet->payload[i + 3] : 0,
-            i + 4 < packet->length ? packet->payload[i + 4] : 0,
-            i + 5 < packet->length ? packet->payload[i + 5] : 0,
-            i + 6 < packet->length ? packet->payload[i + 6] : 0,
-            i + 7 < packet->length ? packet->payload[i + 7] : 0);
-      }
-
-      LOG_ERR("Rejecting corrupted packet to prevent buffer overrun");
-      break;
-    }
-
-    // Validate packet length matches expected data size
-    size_t expected_payload_size = sizeof(helios_data_telemetry_bundle_t)
-        + (bundle->motor_count * sizeof(helios_telemetry_motor_t))
-        + (bundle->temp_count * sizeof(helios_telemetry_temperature_t));
-
-    if (packet->length != expected_payload_size) {
-      LOG_ERR("Telemetry packet length mismatch: received=%u, expected=%zu",
-          packet->length, expected_payload_size);
-      LOG_ERR("Breakdown: header=%zu, motors=%u*%zu=%zu, temps=%u*%zu=%zu",
-          sizeof(helios_data_telemetry_bundle_t),
-          bundle->motor_count, sizeof(helios_telemetry_motor_t),
-          bundle->motor_count * sizeof(helios_telemetry_motor_t),
-          bundle->temp_count, sizeof(helios_telemetry_temperature_t),
-          bundle->temp_count * sizeof(helios_telemetry_temperature_t));
-      LOG_ERR("Packet details: msg_type=0x%02X, CRC=0x%04X", packet->msg_type, packet->crc);
-
-      // Hexdump payload to see structure
-      LOG_ERR("Payload hexdump (first 32 bytes):");
-      for (size_t i = 0; i < 32 && i < packet->length; i += 8) {
-        LOG_ERR("  [%02zu]: %02X %02X %02X %02X %02X %02X %02X %02X",
-            i,
-            i + 0 < packet->length ? packet->payload[i + 0] : 0,
-            i + 1 < packet->length ? packet->payload[i + 1] : 0,
-            i + 2 < packet->length ? packet->payload[i + 2] : 0,
-            i + 3 < packet->length ? packet->payload[i + 3] : 0,
-            i + 4 < packet->length ? packet->payload[i + 4] : 0,
-            i + 5 < packet->length ? packet->payload[i + 5] : 0,
-            i + 6 < packet->length ? packet->payload[i + 6] : 0,
-            i + 7 < packet->length ? packet->payload[i + 7] : 0);
-      }
-
-      LOG_ERR("Rejecting corrupted packet (motor_count=%u, temp_count=%u)",
-          bundle->motor_count, bundle->temp_count);
-      break;
-    }
-
-    // Parse variable-length data
-    const uint8_t* ptr = packet->payload + sizeof(helios_data_telemetry_bundle_t);
-
-    // Prepare telemetry message for Zbus
-    helios_telemetry_msg_t telemetry_msg = {
-      .state = bundle->state,
-      .error = bundle->error,
-      .temperature = 0.0,
-      .motor_rpm = 0,
-      .motor_target_rpm = 0,
-      .valid = true
-    };
-
-    // Read motor data
-    for (int i = 0; i < bundle->motor_count; i++) {
-      helios_telemetry_motor_t* motor = (helios_telemetry_motor_t*)ptr;
-      uint32_t pwm_percent = (motor->pwm_period > 0)
-          ? (motor->pwm_duty * 100) / motor->pwm_period
-          : 0;
-      LOG_DBG("Motor %d: RPM=%u, target=%u, PWM=%u%% (%u/%u ns)", i, motor->rpm,
-          motor->target_rpm, pwm_percent, motor->pwm_duty, motor->pwm_period);
-
-      // Store first motor data in telemetry message
-      if (i == 0) {
-        telemetry_msg.motor_rpm = motor->rpm;
-        telemetry_msg.motor_target_rpm = motor->target_rpm;
-
-        // Log suspicious high values with detailed diagnostics
-        if (motor->rpm > 6000 || motor->target_rpm > 6000) {
-          LOG_ERR("ANOMALY: Suspicious RPM values detected!");
-          LOG_ERR("  Motor %d: rpm=%d (0x%08X), target=%d (0x%08X)",
-              i, motor->rpm, motor->rpm, motor->target_rpm, motor->target_rpm);
-          LOG_ERR("  PWM: duty=%u, period=%u", motor->pwm_duty, motor->pwm_period);
-          LOG_ERR("  Motor data offset from payload start: %zu bytes",
-              (size_t)((const uint8_t*)motor - packet->payload));
-
-          // Hexdump the motor struct bytes to see if alignment is correct
-          const uint8_t* motor_bytes = (const uint8_t*)motor;
-          LOG_ERR("  Motor struct hexdump (%zu bytes):", sizeof(helios_telemetry_motor_t));
-          LOG_ERR("    [00-07]: %02X %02X %02X %02X %02X %02X %02X %02X",
-              motor_bytes[0], motor_bytes[1], motor_bytes[2], motor_bytes[3],
-              motor_bytes[4], motor_bytes[5], motor_bytes[6], motor_bytes[7]);
-          LOG_ERR("    [08-15]: %02X %02X %02X %02X %02X %02X %02X %02X",
-              motor_bytes[8], motor_bytes[9], motor_bytes[10], motor_bytes[11],
-              motor_bytes[12], motor_bytes[13], motor_bytes[14], motor_bytes[15]);
-          if (sizeof(helios_telemetry_motor_t) > 16) {
-            LOG_ERR("    [16-23]: %02X %02X %02X %02X %02X %02X %02X %02X",
-                motor_bytes[16], motor_bytes[17], motor_bytes[18], motor_bytes[19],
-                motor_bytes[20], motor_bytes[21], motor_bytes[22], motor_bytes[23]);
-          }
-
-          // Also log bundle header values for context
-          LOG_ERR("  Bundle: state=%u, error=%u, motor_count=%u, temp_count=%u",
-              bundle->state, bundle->error, bundle->motor_count, bundle->temp_count);
-        }
-
-        LOG_DBG("Parsed motor data: rpm=%d target=%d", motor->rpm, motor->target_rpm);
-      }
-
-      ptr += sizeof(helios_telemetry_motor_t);
-    }
-
-    // Read temperature data
-    for (int i = 0; i < bundle->temp_count; i++) {
-      helios_telemetry_temperature_t* temp = (helios_telemetry_temperature_t*)ptr;
-      LOG_DBG("Temp %d: %.1f°C", i, (double)temp->temperature);
-
-      // Store first temperature reading in telemetry message
-      if (i == 0) {
-        telemetry_msg.temperature = (double)temp->temperature;
-        LOG_DBG("Parsed temperature: %.1f", (double)temp->temperature);
-      }
-
-      ptr += sizeof(helios_telemetry_temperature_t);
-    }
-
-    // Publish to Zbus
-    int ret = zbus_chan_pub(&helios_telemetry_chan, &telemetry_msg, PUB_TIMEOUT);
+  case FUSAIN_MSG_MOTOR_DATA: {
+    struct motor_data_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_motor_data_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
     if (ret != 0) {
-      LOG_WRN("Failed to publish telemetry to Zbus: %d", ret);
+      LOG_WRN("Failed to decode MOTOR_DATA: %d", ret);
+      break;
     }
 
+    // Store motor data (use motor index 0 for display)
+    if (decoded.motor_data_payload_motor_index_m == 0) {
+      state->motor_rpm = decoded.motor_data_payload_uint2int;
+      state->motor_target_rpm = decoded.motor_data_payload_uint3int;
+
+      // Log suspicious high values
+      if (state->motor_rpm > 6000 || state->motor_target_rpm > 6000) {
+        LOG_ERR("ANOMALY: Suspicious RPM values detected!");
+        LOG_ERR("  Motor %u: rpm=%d, target=%d",
+            decoded.motor_data_payload_motor_index_m,
+            state->motor_rpm, state->motor_target_rpm);
+      }
+
+      LOG_DBG("Motor %u: RPM=%d, target=%d",
+          decoded.motor_data_payload_motor_index_m,
+          state->motor_rpm, state->motor_target_rpm);
+    }
+
+    state->last_telemetry_time = current_micros;
     break;
   }
 
-  case HELIOS_MSG_ERROR_INVALID_CRC: {
-    helios_error_invalid_crc_t* error = (helios_error_invalid_crc_t*)packet->payload;
-    LOG_ERR("Helios reported CRC error: calculated=0x%04X, received=0x%04X",
-        error->calculated_crc, error->received_crc);
+  case FUSAIN_MSG_TEMP_DATA: {
+    struct temp_data_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_temp_data_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode TEMP_DATA: %d", ret);
+      break;
+    }
+
+    // Store temperature data (use thermometer index 0 for display)
+    if (decoded.temp_data_payload_thermometer_index_m == 0) {
+      state->temperature = decoded.temp_data_payload_uint2float;
+      LOG_DBG("Temp %u: %.1f°C", decoded.temp_data_payload_thermometer_index_m,
+          decoded.temp_data_payload_uint2float);
+    }
+
+    state->last_telemetry_time = current_micros;
     break;
   }
 
-  case HELIOS_MSG_ERROR_INVALID_COMMAND: {
-    helios_error_invalid_command_t* error = (helios_error_invalid_command_t*)packet->payload;
-    LOG_ERR("Helios reported invalid command: 0x%02X", error->invalid_command);
+  case FUSAIN_MSG_DEVICE_ANNOUNCE: {
+    struct device_announce_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_device_announce_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode DEVICE_ANNOUNCE: %d", ret);
+      break;
+    }
+    LOG_INF("Device announce: motors=%u, temps=%u, pumps=%u, glows=%u",
+        decoded.device_announce_payload_uint0uint,
+        decoded.device_announce_payload_uint1uint,
+        decoded.device_announce_payload_uint2uint,
+        decoded.device_announce_payload_uint3uint);
     break;
   }
 
-  case HELIOS_MSG_ERROR_INVALID_LENGTH: {
-    helios_error_invalid_length_t* error = (helios_error_invalid_length_t*)packet->payload;
-    LOG_ERR("Helios reported invalid length: received=%u, expected=%u",
-        error->received_length, error->expected_length);
+  case FUSAIN_MSG_ERROR_INVALID_CMD: {
+    struct error_invalid_cmd_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_error_invalid_cmd_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode ERROR_INVALID_CMD: %d", ret);
+      break;
+    }
+    LOG_ERR("Helios reported invalid command error: code=%d",
+        decoded.error_invalid_cmd_payload_uint0int);
+    break;
+  }
+
+  case FUSAIN_MSG_ERROR_STATE_REJECT: {
+    struct error_state_reject_payload decoded;
+    size_t decoded_len;
+    size_t hdr_len = cbor_header_len(packet->msg_type);
+    int ret = cbor_decode_error_state_reject_payload(packet->payload + hdr_len,
+        packet->length - hdr_len, &decoded, &decoded_len);
+    if (ret != 0) {
+      LOG_WRN("Failed to decode ERROR_STATE_REJECT: %d", ret);
+      break;
+    }
+    LOG_ERR("Helios rejected command: current state=%u",
+        decoded.error_state_reject_payload_state_m);
     break;
   }
 
@@ -666,7 +656,7 @@ static void process_packet(const helios_packet_t* packet, struct serial_state* s
  */
 static void process_rx_packets(struct serial_state* state, uint64_t current_micros)
 {
-  helios_packet_t rx_packet;
+  fusain_packet_t rx_packet;
   while (k_msgq_get(&rx_packet_queue, &rx_packet, K_NO_WAIT) == 0) {
     process_packet(&rx_packet, state, current_micros);
   }
@@ -679,7 +669,7 @@ static void process_rx_packets(struct serial_state* state, uint64_t current_micr
  */
 static void process_tx_queue(void)
 {
-  helios_packet_t tx_packet;
+  fusain_packet_t tx_packet;
   if (k_msgq_get(&tx_packet_queue, &tx_packet, K_NO_WAIT) == 0) {
     fill_transmit_buffer(&tx_packet);
   }
@@ -691,10 +681,10 @@ static void process_tx_queue(void)
  * Encodes packet to buffer. Polling loop will send it.
  * Called from serial thread.
  */
-static void fill_transmit_buffer(const helios_packet_t* packet)
+static void fill_transmit_buffer(const fusain_packet_t* packet)
 {
   // Encode packet to buffer
-  int len = helios_encode_packet(packet, tx_buffer, sizeof(tx_buffer));
+  int len = fusain_encode_packet(packet, tx_buffer, sizeof(tx_buffer));
   if (len < 0) {
     LOG_ERR("Encoding failed: %d", len);
     return;
@@ -713,14 +703,14 @@ static void fill_transmit_buffer(const helios_packet_t* packet)
  * Queues packet for transmission by serial thread.
  * Called from public API functions.
  */
-static void send_packet(const helios_packet_t* packet)
+static void send_packet(const fusain_packet_t* packet)
 {
   int ret = k_msgq_put(&tx_packet_queue, packet, K_NO_WAIT);
   if (ret != 0) {
     LOG_ERR("TX queue full, dropping packet type 0x%02X", packet->msg_type);
   } else {
     // Log successful queueing of pings for debugging
-    if (packet->msg_type == HELIOS_MSG_PING_REQUEST) {
+    if (packet->msg_type == FUSAIN_MSG_PING_REQUEST) {
       LOG_DBG("Ping queued for transmission");
     }
   }
@@ -746,8 +736,8 @@ static void handle_emergency_stop(struct serial_state* state, uint64_t current_m
     return;
   }
 
-  helios_packet_t packet;
-  helios_create_set_mode(&packet, HELIOS_MODE_EMERGENCY, 0);
+  fusain_packet_t packet;
+  fusain_create_state_command(&packet, 0, FUSAIN_MODE_EMERGENCY, 0); // Broadcast address
   fill_transmit_buffer(&packet);
   state->last_emergency_stop_time = current_micros;
 }
@@ -792,7 +782,7 @@ static void handle_telemetry_config(struct serial_state* state, uint64_t current
   // On first call (last_time == 0), send immediately
   if (state->last_telemetry_request_time == 0) {
     LOG_INF("Requesting telemetry from Helios ICU");
-    helios_send_telemetry_config(true, 100, 0);
+    helios_send_telemetry_config(true, 100);
     state->last_telemetry_request_time = current_micros;
     return;
   }
@@ -803,7 +793,7 @@ static void handle_telemetry_config(struct serial_state* state, uint64_t current
   }
 
   LOG_DBG("Retrying telemetry config (still waiting for first telemetry)");
-  helios_send_telemetry_config(true, 100, 0);
+  helios_send_telemetry_config(true, 100);
   state->last_telemetry_request_time = current_micros;
 }
 
@@ -847,11 +837,11 @@ static void serial_handler_listener_cb(const struct zbus_channel* chan)
   // Only handle helios_state_command_chan
   if (chan == &helios_state_command_chan) {
     // In listener callback, channel is already locked - use const_msg
-    const helios_state_command_msg_t* cmd = zbus_chan_const_msg(chan);
+    const fusain_state_command_msg_t* cmd = zbus_chan_const_msg(chan);
 
     LOG_INF("Received state command: mode=%u, parameter=%u", cmd->mode, cmd->parameter);
 
-    // Send SET_MODE command to Helios via serial protocol
+    // Send STATE_COMMAND to Helios via serial protocol
     helios_set_mode(cmd->mode, cmd->parameter);
   }
 }

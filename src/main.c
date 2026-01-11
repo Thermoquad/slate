@@ -34,11 +34,11 @@ ZBUS_LISTENER_DEFINE(display_listener, display_telemetry_callback);
  * appropriate SET_MODE protocol messages.
  */
 ZBUS_CHAN_DEFINE(helios_state_command_chan,
-    helios_state_command_msg_t,
+    fusain_state_command_msg_t,
     NULL, // No validator
     NULL, // No user data
     ZBUS_OBSERVERS(serial_handler_listener), // Serial handler subscribes
-    ZBUS_MSG_INIT(.mode = HELIOS_MODE_IDLE, .parameter = 0) // Initialize to idle
+    ZBUS_MSG_INIT(.mode = FUSAIN_MODE_IDLE, .parameter = 0) // Initialize to idle
 );
 
 /**
