@@ -12,8 +12,8 @@
 //////////////////////////////////////////////////////////////
 
 #include <fusain/fusain.h>
-#include <fusain_cbor_decode.h>
-#include <fusain_cbor_types.h>
+#include <fusain/generated/cbor_decode.h>
+#include <fusain/generated/cbor_types.h>
 #include <slate/serial_handler.h>
 #include <slate/zbus.h>
 #include <zephyr/device.h>
