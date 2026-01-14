@@ -34,9 +34,9 @@ void helios_send_telemetry_config(bool enabled, uint32_t interval_ms);
  * Send state command to Helios ICU
  *
  * @param mode Operating mode
- * @param parameter Mode-specific parameter (e.g., pump rate for heating)
+ * @param argument Mode-specific argument (e.g., RPM for FAN, pump rate for HEAT)
  */
-void helios_set_mode(fusain_mode_t mode, uint32_t parameter);
+void helios_set_mode(fusain_mode_t mode, int32_t argument);
 
 /**
  * Get last known Helios state

@@ -11,14 +11,22 @@
  *
  * These channels facilitate communication between shell commands
  * and the serial handler for controlling the remote Helios ICU.
- *
- * Message structures are defined in fusain/fusain.h:
- * - fusain_state_command_msg_t
  */
 
 //////////////////////////////////////////////////////////////
 // Message Types
 //////////////////////////////////////////////////////////////
+
+/**
+ * Helios state command message (for Zbus IPC)
+ *
+ * Used by shell commands to request mode changes from serial handler.
+ * Fields match fusain_create_state_command() API.
+ */
+typedef struct {
+	fusain_mode_t mode;
+	int32_t argument;
+} fusain_state_command_msg_t;
 
 /**
  * Helios telemetry data message
@@ -28,7 +36,7 @@
 typedef struct {
 	fusain_state_t state;
 	fusain_error_t error;
-	double temperature;
+	float temperature;
 	int32_t motor_rpm;
 	int32_t motor_target_rpm;
 	bool valid;

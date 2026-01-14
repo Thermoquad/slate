@@ -56,7 +56,7 @@ struct serial_state {
   uint32_t helios_uptime_ms;
 
   // Telemetry values (from individual messages)
-  double temperature;
+  float temperature;
   int32_t motor_rpm;
   int32_t motor_target_rpm;
 
@@ -161,14 +161,14 @@ void helios_send_telemetry_config(bool enabled, uint32_t interval_ms)
  * Sends a mode change command to Helios ICU.
  *
  * @param mode Operating mode (IDLE, FAN, HEAT, EMERGENCY)
- * @param parameter Mode-specific parameter (e.g., RPM for FAN, pump rate for HEAT)
+ * @param argument Mode-specific argument (e.g., RPM for FAN, pump rate for HEAT)
  */
-void helios_set_mode(fusain_mode_t mode, uint32_t parameter)
+void helios_set_mode(fusain_mode_t mode, int32_t argument)
 {
   fusain_packet_t packet;
-  fusain_create_state_command(&packet, 0, mode, parameter); // Broadcast address
+  fusain_create_state_command(&packet, 0, mode, argument); // Broadcast address
   send_packet(&packet);
-  LOG_DBG("Set mode: mode=%u, parameter=%u", mode, parameter);
+  LOG_DBG("Set mode: mode=%u, argument=%d", mode, argument);
 }
 
 /**
@@ -839,10 +839,10 @@ static void serial_handler_listener_cb(const struct zbus_channel* chan)
     // In listener callback, channel is already locked - use const_msg
     const fusain_state_command_msg_t* cmd = zbus_chan_const_msg(chan);
 
-    LOG_INF("Received state command: mode=%u, parameter=%u", cmd->mode, cmd->parameter);
+    LOG_INF("Received state command: mode=%u, argument=%d", cmd->mode, cmd->argument);
 
     // Send STATE_COMMAND to Helios via serial protocol
-    helios_set_mode(cmd->mode, cmd->parameter);
+    helios_set_mode(cmd->mode, cmd->argument);
   }
 }
 

@@ -38,7 +38,7 @@ ZBUS_CHAN_DEFINE(helios_state_command_chan,
     NULL, // No validator
     NULL, // No user data
     ZBUS_OBSERVERS(serial_handler_listener), // Serial handler subscribes
-    ZBUS_MSG_INIT(.mode = FUSAIN_MODE_IDLE, .parameter = 0) // Initialize to idle
+    ZBUS_MSG_INIT(.mode = FUSAIN_MODE_IDLE, .argument = 0) // Initialize to idle
 );
 
 /**

@@ -53,8 +53,8 @@ static int send_state_command(const struct shell* sh, fusain_state_command_msg_t
     return ret;
   }
 
-  shell_print(sh, "Sending %s command to Helios (parameter: %u)",
-      fusain_mode_names[cmd->mode], cmd->parameter);
+  shell_print(sh, "Sending %s command to Helios (argument: %d)",
+      fusain_mode_names[cmd->mode], cmd->argument);
   return 0;
 }
 
@@ -98,7 +98,7 @@ int cmd_set_idle(const struct shell* sh, size_t argc, char** argv)
 
   fusain_state_command_msg_t cmd = {
     .mode = FUSAIN_MODE_IDLE,
-    .parameter = 0,
+    .argument = 0,
   };
 
   return send_state_command(sh, &cmd);
@@ -119,7 +119,7 @@ int cmd_set_fan(const struct shell* sh, size_t argc, char** argv)
 
   fusain_state_command_msg_t cmd = {
     .mode = FUSAIN_MODE_FAN,
-    .parameter = (uint32_t)rpm,
+    .argument = rpm,
   };
 
   return send_state_command(sh, &cmd);
@@ -140,7 +140,7 @@ int cmd_set_heat(const struct shell* sh, size_t argc, char** argv)
 
   fusain_state_command_msg_t cmd = {
     .mode = FUSAIN_MODE_HEAT,
-    .parameter = (uint32_t)pump_rate,
+    .argument = pump_rate,
   };
 
   return send_state_command(sh, &cmd);
