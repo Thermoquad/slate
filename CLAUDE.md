@@ -32,6 +32,8 @@
 - **Protocol:** Fusain protocol (via fusain module)
 - **Transports:** UART, WiFi, Bluetooth, CAN bus (depending on mode)
 
+**License:** GPL-2.0-or-later (GNU General Public License v2.0 or later)
+
 ---
 
 ## Project Status

@@ -2,7 +2,7 @@
  * Copyright (c) 2016 Intel Corporation.
  * Copyright (c) 2025 Kaz Walker, Thermoquad
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <zephyr/input/input.h>

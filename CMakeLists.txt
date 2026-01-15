@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: GPL-2.0-or-later
 
 cmake_minimum_required(VERSION 3.20.0)
 

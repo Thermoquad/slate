@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Generated file - regenerate with lv_font_conv (see README.md)
+
 /*******************************************************************************
  * Size: 12 px
  * Bpp: 1

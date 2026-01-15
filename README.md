@@ -2,6 +2,12 @@
 
 Multi-mode controller firmware for the Helios liquid fuel burner system.
 
+## License
+
+This project is licensed under the **GNU General Public License v2.0 or later** (GPL-2.0-or-later).
+
+See the [LICENSE.md](LICENSE.md) file for the full license text.
+
 ## Serial Protocol
 
 Slate communicates with Helios using the **Fusain Protocol v2.0** (binary packet protocol).
