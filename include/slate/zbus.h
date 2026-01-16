@@ -90,7 +90,8 @@ typedef struct {
 	uint32_t reconnect_interval; // seconds
 	char ssid[33];               // Current/target SSID
 	char ipv4_address[16];       // IPv4 address (if connected)
-	char ipv6_address[46];       // IPv6 address (if connected)
+	char ipv6_address[46];       // IPv6 address (if connected, prefers global over link-local)
+	char hostname[64];           // Device hostname
 } wifi_status_msg_t;
 
 //////////////////////////////////////////////////////////////

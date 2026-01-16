@@ -7,12 +7,15 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/net/hostname.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/wifi.h>
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/zbus/zbus.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <string.h>
+#include <stdio.h>
 
 #include <slate/wifi.h>
 #include <slate/wifi_config.h>
@@ -102,6 +105,7 @@ static void wifi_thread(void *p1, void *p2, void *p3);
 static int wifi_connect_internal(void);
 static void publish_wifi_status(void);
 static void handle_wifi_command(const wifi_command_msg_t *cmd);
+static void set_hostname_from_device_id(void);
 
 //////////////////////////////////////////////////////////////
 // Event Handler
@@ -224,6 +228,9 @@ static void wifi_thread(void *p1, void *p2, void *p3)
 		wifi_state.reconnect_interval = settings.reconnect_interval;
 	}
 
+	// Set hostname from device ID before connecting
+	set_hostname_from_device_id();
+
 	// Initial connect if auto_connect enabled and credentials exist
 	if (wifi_state.auto_connect && wifi_state.has_credentials) {
 		LOG_INF("Auto-connect enabled, connecting to WiFi...");
@@ -335,10 +342,20 @@ static void publish_wifi_status(void)
 	strncpy(msg.ssid, wifi_state.ssid, sizeof(msg.ssid) - 1);
 	msg.ssid[sizeof(msg.ssid) - 1] = '\0';
 
+	// Get hostname
+	const char *hostname = net_hostname_get();
+	if (hostname) {
+		strncpy(msg.hostname, hostname, sizeof(msg.hostname) - 1);
+		msg.hostname[sizeof(msg.hostname) - 1] = '\0';
+	} else {
+		msg.hostname[0] = '\0';
+	}
+
 	// Get IP addresses if connected
 	if (wifi_state.connected) {
 		wifi_get_ip_address(msg.ipv4_address, sizeof(msg.ipv4_address));
-		// Get IPv6 address (may fail if not configured, which is OK)
+
+		// Get IPv6 address (prefers global over link-local)
 		if (wifi_get_ipv6_address(msg.ipv6_address, sizeof(msg.ipv6_address)) != 0) {
 			msg.ipv6_address[0] = '\0';
 		}
@@ -361,6 +378,40 @@ static void publish_wifi_status(void)
 	if (ret != 0) {
 		LOG_WRN("Failed to publish WiFi status: %d", ret);
 	}
+}
+
+/**
+ * Generate and set hostname from device ID
+ *
+ * Creates hostname in format: <CONFIG_NET_HOSTNAME>-XXXX
+ * where XXXX is hex from last 2 bytes of device ID
+ */
+static void set_hostname_from_device_id(void)
+{
+	uint8_t device_id[16];
+	ssize_t id_len;
+	char hostname[64];
+
+	// Get device ID from hardware
+	id_len = hwinfo_get_device_id(device_id, sizeof(device_id));
+	if (id_len < 2) {
+		LOG_WRN("Failed to get device ID (len=%d), using default hostname", id_len);
+		return;
+	}
+
+	// Use last 2 bytes for suffix (4 hex chars)
+	uint8_t *suffix = &device_id[id_len - 2];
+	snprintf(hostname, sizeof(hostname), CONFIG_NET_HOSTNAME "-%02x%02x",
+		 suffix[0], suffix[1]);
+
+	// Set the hostname
+	int ret = net_hostname_set(hostname, strlen(hostname));
+	if (ret < 0) {
+		LOG_ERR("Failed to set hostname '%s': %d", hostname, ret);
+		return;
+	}
+
+	LOG_INF("Hostname set to: %s", hostname);
 }
 
 /**
@@ -509,7 +560,19 @@ int wifi_get_ipv6_address(char *addr_str, size_t buf_len)
 		return -ENOENT;
 	}
 
-	// Find first unicast address that is in use
+	// First pass: look for global unicast addresses (not link-local fe80::)
+	for (int i = 0; i < NET_IF_MAX_IPV6_ADDR; i++) {
+		if (ipv6->unicast[i].is_used) {
+			// Check if this is NOT a link-local address (fe80::/10)
+			if (!net_ipv6_is_ll_addr(&ipv6->unicast[i].address.in6_addr)) {
+				net_addr_ntop(AF_INET6, &ipv6->unicast[i].address.in6_addr,
+					      addr_str, buf_len);
+				return 0;
+			}
+		}
+	}
+
+	// Second pass: fall back to link-local if no global address found
 	for (int i = 0; i < NET_IF_MAX_IPV6_ADDR; i++) {
 		if (ipv6->unicast[i].is_used) {
 			net_addr_ntop(AF_INET6, &ipv6->unicast[i].address.in6_addr,

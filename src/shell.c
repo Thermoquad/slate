@@ -379,6 +379,14 @@ int cmd_wifi_status(const struct shell* sh, size_t argc, char** argv)
   ARG_UNUSED(argc);
   ARG_UNUSED(argv);
 
+  // Get WiFi status from Zbus
+  wifi_status_msg_t status_msg;
+  int rc = zbus_chan_read(&wifi_status_chan, &status_msg, K_MSEC(100));
+  if (rc != 0) {
+    shell_print(sh, "Error: Failed to read WiFi status from Zbus: %d", rc);
+    return rc;
+  }
+
   // Get WiFi station interface
   struct net_if* iface = net_if_get_wifi_sta();
   if (!iface) {
@@ -388,7 +396,7 @@ int cmd_wifi_status(const struct shell* sh, size_t argc, char** argv)
 
   // Request WiFi interface status
   struct wifi_iface_status status = { 0 };
-  int rc = net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status,
+  rc = net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status,
                     sizeof(struct wifi_iface_status));
   if (rc != 0) {
     shell_print(sh, "Status request failed: %d", rc);
@@ -399,6 +407,11 @@ int cmd_wifi_status(const struct shell* sh, size_t argc, char** argv)
   shell_print(sh, "Status: successful");
   shell_print(sh, "==================");
   shell_print(sh, "State: %s", wifi_state_txt(status.state));
+
+  // Display hostname from Zbus
+  if (status_msg.hostname[0] != '\0') {
+    shell_print(sh, "Hostname: %s", status_msg.hostname);
+  }
 
   // Print detailed info only if associated
   if (status.state >= WIFI_STATE_ASSOCIATED) {
@@ -430,16 +443,14 @@ int cmd_wifi_status(const struct shell* sh, size_t argc, char** argv)
     shell_print(sh, "TWT: %s", status.twt_capable ? "Supported" : "Not supported");
     shell_print(sh, "Current PHY TX rate (Mbps) : %.1f", (double)status.current_phy_tx_rate);
 
-    // Get and display IP addresses
-    char ipv4_addr[16] = {0};
-    char ipv6_addr[46] = {0};
-
-    if (wifi_get_ip_address(ipv4_addr, sizeof(ipv4_addr)) == 0) {
-      shell_print(sh, "IPv4 Address: %s", ipv4_addr);
+    // Display IP addresses from Zbus
+    if (status_msg.ipv4_address[0] != '\0') {
+      shell_print(sh, "IPv4 Address: %s", status_msg.ipv4_address);
     }
 
-    if (wifi_get_ipv6_address(ipv6_addr, sizeof(ipv6_addr)) == 0) {
-      shell_print(sh, "IPv6 Address: %s", ipv6_addr);
+    // Display IPv6 address (hide field if none)
+    if (status_msg.ipv6_address[0] != '\0') {
+      shell_print(sh, "IPv6 Address: %s", status_msg.ipv6_address);
     }
   }
 
