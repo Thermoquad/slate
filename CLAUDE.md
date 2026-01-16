@@ -63,6 +63,16 @@
 - 🔲 CAN bus messaging
 - 🔲 State management and persistence
 
+**Roadmap Priority (First Burn):**
+- 🔲 **WebSocket Bridge** - Required for First Burn milestone (Tier 7)
+  - WebSocket endpoint at port 80 (`/fusain`)
+  - Bidirectional packet forwarding (WebSocket ↔ Serial)
+  - Support for Heliostat remote control via network
+  - mDNS responder (`thermoquad-XXXX.local`)
+  - WiFi credential storage (NVS)
+  - Shell command: `wifi_save <ssid> <password>`
+  - See: `origin/documentation/source/development/roadmap/first-burn.rst`
+
 **Development Hardware (Prototype):**
 - ✅ OLED LCD display (SSD1306, I2C, working with LVGL)
 - ✅ Quadrature encoder (working)
@@ -754,13 +764,36 @@ This project has progressed from early prototype to functional telemetry display
 **Development with AI Assistance:**
 All development is documented in this CLAUDE.md file to guide AI assistants. Follow the "ask questions, don't assume" philosophy documented in the organization CLAUDE.md.
 
-**Last Updated:** 2026-01-09
+**Last Updated:** 2026-01-15
 
 ---
 
 ## AI Assistant Operations
 
-To reload all organization CLAUDE.md files or run a content integrity check, see the **CLAUDE.md Reload** and **Content Integrity Check** sections in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
+### Content Integrity Check
+
+To verify consistency across all CLAUDE.md files in the organization, see the **Content Integrity Check** section in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
+
+**How to Request:** Ask the AI assistant to "run a content integrity check on all CLAUDE.md files"
+
+### Content Status Integrity Check
+
+To validate that this CLAUDE.md accurately reflects the actual Slate firmware implementation, see the **Content Status Integrity Check** section in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
+
+**How to Request:** Ask the AI assistant to "run a content status integrity check on slate"
+
+**What Gets Checked for Slate:**
+- Features marked as "working" (✅) actually exist in code (src/display.c, src/serial_handler.c, etc.)
+- Features marked as "planned" (🔲) are not yet implemented
+- LVGL integration status matches documented state
+- Serial communication code matches Fusain usage patterns
+- prj.conf Kconfig options match documented features
+- Input hardware (encoder, button) configuration matches documented state
+- Build system works as documented (task build-firmware succeeds)
+
+### CLAUDE.md Reload
+
+To reload all organization CLAUDE.md files, see the **CLAUDE.md Reload** section in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
 
 ---
 
