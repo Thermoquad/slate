@@ -638,8 +638,8 @@ static void process_packet(const fusain_packet_t* packet, struct serial_state* s
       LOG_WRN("Failed to decode ERROR_STATE_REJECT: %d", ret);
       break;
     }
-    LOG_ERR("Helios rejected command: current state=%u",
-        decoded.error_state_reject_payload_state_m);
+    LOG_ERR("Helios rejected command: current state=%d",
+        decoded.error_state_reject_payload_uint0int);
     break;
   }
 

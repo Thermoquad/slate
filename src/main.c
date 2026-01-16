@@ -10,8 +10,10 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/zbus/zbus.h>
 
+#include <slate/config.h>
 #include <slate/display.h>
 #include <slate/serial_handler.h>
+#include <slate/wifi_config.h>
 #include <slate/zbus.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
@@ -83,5 +85,20 @@ K_THREAD_DEFINE(display_id, 8192, display_thread, NULL, NULL, NULL, 5, 0, 0); //
 int main(void)
 {
   LOG_INF("Slate controller starting");
+
+  // Initialize configuration storage
+  int rc = config_init();
+  if (rc != 0) {
+    LOG_ERR("Failed to initialize config storage: %d", rc);
+    return rc;
+  }
+
+  // Check if WiFi credentials are stored
+  if (wifi_config_exists()) {
+    LOG_INF("WiFi credentials found in storage");
+  } else {
+    LOG_INF("No WiFi credentials stored - use 'wifi_save' command");
+  }
+
   return 0;
 }
