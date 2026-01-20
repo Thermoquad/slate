@@ -25,6 +25,13 @@ int cmd_helios(const struct shell* sh, size_t argc, char** argv);
 int cmd_get_state(const struct shell* sh, size_t argc, char** argv);
 
 /**
+ * Get Helios serial status
+ *
+ * Displays bytes received, packets decoded, and connection status
+ */
+int cmd_helios_status(const struct shell* sh, size_t argc, char** argv);
+
+/**
  * Set Helios to IDLE mode
  *
  * Sends SET_MODE command with HELIOS_MODE_IDLE
@@ -120,6 +127,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 SHELL_STATIC_SUBCMD_SET_CREATE(
     sub_helios,
     SHELL_CMD(state, &sub_helios_state, "Control Helios state", cmd_get_state),
+    SHELL_CMD(status, NULL, "Show serial status", cmd_helios_status),
     SHELL_SUBCMD_SET_END);
 
 /**

@@ -98,6 +98,24 @@ int cmd_get_state(const struct shell* sh, size_t argc, char** argv)
   return 0;
 }
 
+int cmd_helios_status(const struct shell* sh, size_t argc, char** argv)
+{
+  ARG_UNUSED(argc);
+  ARG_UNUSED(argv);
+
+  struct serial_handler_stats stats;
+  serial_handler_get_stats(&stats);
+
+  shell_print(sh, "Helios Serial Status:");
+  shell_print(sh, "  Bytes received: %u", stats.bytes_received);
+  shell_print(sh, "  Packets decoded: %u", stats.packets_decoded);
+  shell_print(sh, "  Ping response: %s", stats.ping_response_received ? "yes" : "no");
+  shell_print(sh, "  Telemetry: %s", stats.telemetry_received ? "yes" : "no");
+  shell_print(sh, "  Helios uptime: %u ms", stats.helios_uptime_ms);
+
+  return 0;
+}
+
 int cmd_set_idle(const struct shell* sh, size_t argc, char** argv)
 {
   ARG_UNUSED(argc);

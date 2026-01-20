@@ -22,6 +22,15 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/zbus/zbus.h>
 
+#ifdef CONFIG_SOC_FAMILY_RPI_PICO
+// RP2040/RP2350 UART register offsets for direct FIFO flush
+// These are standard PL011 UART registers
+#define UART_DR_OFFSET 0x00 // Data Register
+#define UART_RSR_OFFSET 0x04 // Receive Status Register / Error Clear
+#define UART_FR_OFFSET 0x18 // Flag Register
+#define UART_FR_RXFE 0x10 // RX FIFO Empty bit (bit 4)
+#endif /* CONFIG_SOC_FAMILY_RPI_PICO */
+
 //////////////////////////////////////////////////////////////
 // Config
 //////////////////////////////////////////////////////////////
@@ -88,6 +97,10 @@ K_MSGQ_DEFINE(rx_packet_queue, sizeof(fusain_packet_t), 8, 4);
 
 /* Serial State */
 static struct serial_state serial_state;
+
+/* Debug Counters */
+static uint32_t debug_bytes_received = 0;
+static uint32_t debug_packets_decoded = 0;
 
 //////////////////////////////////////////////////////////////
 // CBOR Helper
@@ -316,11 +329,90 @@ int serial_processing_thread(void)
 // Init Functions
 //////////////////////////////////////////////////////////////
 
+#ifdef CONFIG_SOC_FAMILY_RPI_PICO
+/**
+ * Flush UART RX FIFO using direct register access (RP2040/RP2350)
+ *
+ * The Zephyr uart_poll_in() checks for errors before reading data.
+ * If there's an error (e.g., from noisy boot), it returns the error
+ * code instead of consuming the bad data, leaving the FIFO stuck.
+ *
+ * This function reads directly from the UART data register to flush
+ * all data (including corrupted bytes) from the FIFO.
+ *
+ * @param dev UART device
+ * @return Number of bytes flushed
+ */
+static int uart_flush_fifo_hw(const struct device* dev)
+{
+  // Get UART base address from device config
+  // The UART device config structure contains the base address
+  const struct uart_rpi_config {
+    uint32_t base;
+    // ... other fields we don't care about
+  }* cfg = dev->config;
+
+  volatile uint32_t* dr = (volatile uint32_t*)(cfg->base + UART_DR_OFFSET);
+  volatile uint32_t* fr = (volatile uint32_t*)(cfg->base + UART_FR_OFFSET);
+  volatile uint32_t* rsr = (volatile uint32_t*)(cfg->base + UART_RSR_OFFSET);
+
+  int flushed = 0;
+
+  // Clear any pending errors first
+  *rsr = 0;
+
+  // Read and discard all data in FIFO (RXFE bit = RX FIFO Empty)
+  while (!(*fr & UART_FR_RXFE)) {
+    (void)*dr; // Read and discard
+    flushed++;
+    if (flushed > 64) {
+      // Safety limit - FIFO should only be 32 bytes
+      break;
+    }
+  }
+
+  // Clear any errors that occurred while flushing
+  *rsr = 0;
+
+  return flushed;
+}
+#else
+/**
+ * Flush UART RX FIFO using standard Zephyr API (fallback)
+ *
+ * For non-RP2040/RP2350 platforms, use the standard uart_poll_in().
+ * This may not handle error conditions as well as the hardware version.
+ *
+ * @param dev UART device
+ * @return Number of bytes flushed
+ */
+static int uart_flush_fifo_hw(const struct device* dev)
+{
+  uint8_t discard;
+  int flushed = 0;
+
+  uart_err_check(dev); // Clear errors first
+
+  while (uart_poll_in(dev, &discard) == 0) {
+    flushed++;
+    if (flushed > 64) {
+      break;
+    }
+  }
+
+  return flushed;
+}
+#endif /* CONFIG_SOC_FAMILY_RPI_PICO */
+
 /**
  * Initialize Serial Master
  *
  * Initializes UART device and decoder for polling mode.
  * Must be called before starting serial thread.
+ *
+ * On "noisy boots" (when Helios is already transmitting), the UART
+ * may start mid-byte causing framing/overrun errors. This function
+ * waits for a quiet period between packets before proceeding.
  *
  * @return 0 on success, negative on error
  */
@@ -339,14 +431,10 @@ int serial_master_init(void)
   fusain_reset_decoder(&decoder);
   LOG_DBG("Decoder initialized");
 
-  // Flush any pending RX data using polling
-  uint8_t discard;
-  int flushed = 0;
-  while (uart_poll_in(uart_dev, &discard) == 0) {
-    flushed++;
-  }
+  // Flush UART FIFO using hardware access (handles noisy boot scenario)
+  int flushed = uart_flush_fifo_hw(uart_dev);
   if (flushed > 0) {
-    LOG_DBG("Flushed %d bytes from RX buffer", flushed);
+    LOG_INF("Hardware FIFO flush: %d bytes discarded", flushed);
   }
 
   LOG_INF("Serial master initialized on %s (polling mode)", uart_dev->name);
@@ -372,6 +460,7 @@ static void poll_uart_rx(void)
 
   while (max_bytes-- > 0 && uart_poll_in(uart_dev, &byte) == 0) {
     bytes_read_count++;
+    debug_bytes_received++;
     fusain_packet_t packet;
 
     // Save state BEFORE decoding for diagnostics
@@ -382,6 +471,7 @@ static void poll_uart_rx(void)
 
     if (result == FUSAIN_DECODE_OK) {
       packets_decoded_count++;
+      debug_packets_decoded++;
       LOG_DBG("RX: Packet decoded type=0x%02X (total: %u packets, %u bytes)",
           packet.msg_type, packets_decoded_count, bytes_read_count);
 
@@ -847,3 +937,16 @@ static void serial_handler_listener_cb(const struct zbus_channel* chan)
 }
 
 ZBUS_LISTENER_DEFINE(serial_handler_listener, serial_handler_listener_cb);
+
+//////////////////////////////////////////////////////////////
+// Stats
+//////////////////////////////////////////////////////////////
+
+void serial_handler_get_stats(struct serial_handler_stats* stats)
+{
+  stats->bytes_received = debug_bytes_received;
+  stats->packets_decoded = debug_packets_decoded;
+  stats->ping_response_received = serial_state.ping_response_received;
+  stats->telemetry_received = serial_state.telemetry_received;
+  stats->helios_uptime_ms = serial_state.helios_uptime_ms;
+}

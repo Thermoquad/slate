@@ -67,4 +67,20 @@ int serial_tx_thread(void);
  */
 int serial_processing_thread(void);
 
+/**
+ * Serial handler statistics
+ */
+struct serial_handler_stats {
+  uint32_t bytes_received;
+  uint32_t packets_decoded;
+  bool ping_response_received;
+  bool telemetry_received;
+  uint32_t helios_uptime_ms;
+};
+
+/**
+ * Get serial handler statistics
+ */
+void serial_handler_get_stats(struct serial_handler_stats* stats);
+
 #endif /* SLATE_SERIAL_MASTER_H */
