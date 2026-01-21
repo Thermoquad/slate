@@ -67,4 +67,56 @@ int serial_tx_thread(void);
  */
 int serial_processing_thread(void);
 
+/**
+ * Serial handler statistics
+ */
+struct serial_handler_stats {
+  uint32_t bytes_received;
+  uint32_t packets_decoded;
+  bool ping_response_received;
+  bool telemetry_received;
+  uint32_t helios_uptime_ms;
+};
+
+/**
+ * Get serial handler statistics
+ */
+void serial_handler_get_stats(struct serial_handler_stats* stats);
+
+/**
+ * Telemetry data from Helios
+ */
+struct serial_handler_telemetry {
+  fusain_state_t state;
+  fusain_error_t error;
+  float temperature;
+  int32_t motor_rpm;
+  int32_t motor_target_rpm;
+  bool valid;
+};
+
+/**
+ * Get current telemetry data
+ *
+ * Returns a snapshot of the latest telemetry. Safe to call from any thread.
+ *
+ * @param telemetry Output telemetry data
+ */
+void serial_handler_get_telemetry(struct serial_handler_telemetry* telemetry);
+
+/**
+ * Get tracked Helios device address
+ *
+ * @return Helios address, or 0 if not yet received
+ */
+uint64_t serial_handler_get_helios_address(void);
+
+/**
+ * Send packet to Helios via serial
+ *
+ * @param packet Packet to send
+ * @return 0 on success
+ */
+int serial_handler_send_packet(const fusain_packet_t* packet);
+
 #endif /* SLATE_SERIAL_MASTER_H */

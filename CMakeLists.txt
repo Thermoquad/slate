@@ -12,3 +12,6 @@ project(slate)
 FILE(GLOB_RECURSE app_sources src/*.c)
 target_sources(app PRIVATE ${app_sources})
 target_include_directories(app PRIVATE include)
+
+# Linker section for HTTP resources
+zephyr_linker_sources(SECTIONS sections-rom.ld)

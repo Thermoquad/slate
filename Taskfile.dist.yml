@@ -5,7 +5,7 @@ version: "3"
 env:
   FIRMWARE_IMG: build/zephyr/zephyr.hex
   RP_CFG: ../../tools/installs/openocd/share/openocd/scripts/target/rp2350.cfg
-  BOARD: rpi_pico2/rp2350a/m33
+  BOARD: rpi_pico2/rp2350a/m33/w
   PROBE_USB_ID: 2e8a:000c
   OCD_CFG: cmsis-dap.cfg
 

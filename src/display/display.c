@@ -7,11 +7,212 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/zbus/zbus.h>
 
+#include <fusain/fusain.h>
+#include <fusain/generated/cbor_decode.h>
+#include <fusain/generated/cbor_types.h>
 #include <slate/zbus.h>
 
 LOG_MODULE_REGISTER(display);
 
-// State names for display
+//////////////////////////////////////////////////////////////
+// Forward Declarations
+//////////////////////////////////////////////////////////////
+
+static struct display_appliance_entry* find_or_create_entry(uint64_t address);
+static void process_state_data(uint64_t address, const fusain_packet_t* packet);
+static void process_motor_data(uint64_t address, const fusain_packet_t* packet);
+static void process_temp_data(uint64_t address, const fusain_packet_t* packet);
+
+//////////////////////////////////////////////////////////////
+// Config
+//////////////////////////////////////////////////////////////
+
+#define DISPLAY_UPDATE_INTERVAL_MS 200
+#define DISPLAY_MAX_APPLIANCES 4
+
+//////////////////////////////////////////////////////////////
+// Appliance Cache
+//////////////////////////////////////////////////////////////
+
+/**
+ * Per-appliance telemetry cache entry
+ *
+ * Stores processed telemetry values for a single appliance.
+ * Updated by Zbus callback, read by display thread.
+ */
+struct display_appliance_entry {
+  uint64_t address;       /* Appliance address (0 = unused slot) */
+  int64_t last_seen;      /* Last time any telemetry was received */
+  bool valid;             /* Has received at least one STATE_DATA */
+
+  /* Processed telemetry values */
+  fusain_state_t state;
+  fusain_error_t error;
+  float temperature;
+  int32_t motor_rpm;
+  int32_t motor_target_rpm;
+};
+
+static struct display_appliance_entry appliance_cache[DISPLAY_MAX_APPLIANCES];
+
+/*
+ * TODO: Add UI for appliance selection
+ *
+ * Currently hardcoded to display appliance at index 0. Future work:
+ * - Add encoder navigation to cycle through discovered appliances
+ * - Show appliance address or friendly name on display
+ * - Highlight selected appliance in a list view
+ */
+#define DISPLAY_APPLIANCE_INDEX 0
+
+//////////////////////////////////////////////////////////////
+// CBOR Helpers
+//////////////////////////////////////////////////////////////
+
+/**
+ * Calculate CBOR header length based on message type
+ *
+ * CBOR wire format: [0x82, msg_type, payload_map]
+ * - msg_type 0x00-0x17: header is [0x82, type] = 2 bytes
+ * - msg_type 0x18-0xFF: header is [0x82, 0x18, type] = 3 bytes
+ */
+static inline size_t cbor_header_len(uint8_t msg_type)
+{
+  return (msg_type <= 0x17) ? 2 : 3;
+}
+
+//////////////////////////////////////////////////////////////
+// Cache Helpers
+//////////////////////////////////////////////////////////////
+
+static struct display_appliance_entry* find_or_create_entry(uint64_t address)
+{
+  /* First pass: look for existing entry */
+  for (int i = 0; i < DISPLAY_MAX_APPLIANCES; i++) {
+    if (appliance_cache[i].address == address) {
+      return &appliance_cache[i];
+    }
+  }
+
+  /* Second pass: find empty slot */
+  for (int i = 0; i < DISPLAY_MAX_APPLIANCES; i++) {
+    if (appliance_cache[i].address == 0) {
+      appliance_cache[i].address = address;
+      LOG_INF("Display: New appliance discovered at index %d: %016llx", i, address);
+      return &appliance_cache[i];
+    }
+  }
+
+  LOG_WRN("Display: Appliance cache full, ignoring %016llx", address);
+  return NULL;
+}
+
+static void process_state_data(uint64_t address, const fusain_packet_t* packet)
+{
+  struct display_appliance_entry* entry = find_or_create_entry(address);
+  if (!entry) {
+    return;
+  }
+
+  struct state_data_payload decoded;
+  size_t decoded_len;
+  size_t hdr_len = cbor_header_len(packet->msg_type);
+  int ret = cbor_decode_state_data_payload(
+      packet->payload + hdr_len, packet->length - hdr_len, &decoded, &decoded_len);
+  if (ret != 0) {
+    LOG_DBG("Display: Failed to decode STATE_DATA: %d", ret);
+    return;
+  }
+
+  entry->state = (fusain_state_t)decoded.state_data_payload_state_m;
+  entry->error = (fusain_error_t)decoded.state_data_payload_error_code_m;
+  entry->valid = true;
+  entry->last_seen = k_uptime_get();
+}
+
+static void process_motor_data(uint64_t address, const fusain_packet_t* packet)
+{
+  struct display_appliance_entry* entry = find_or_create_entry(address);
+  if (!entry) {
+    return;
+  }
+
+  struct motor_data_payload decoded;
+  size_t decoded_len;
+  size_t hdr_len = cbor_header_len(packet->msg_type);
+  int ret = cbor_decode_motor_data_payload(
+      packet->payload + hdr_len, packet->length - hdr_len, &decoded, &decoded_len);
+  if (ret != 0) {
+    LOG_DBG("Display: Failed to decode MOTOR_DATA: %d", ret);
+    return;
+  }
+
+  /* Use motor index 0 for display */
+  if (decoded.motor_data_payload_motor_index_m == 0) {
+    entry->motor_rpm = decoded.motor_data_payload_uint2int;
+    entry->motor_target_rpm = decoded.motor_data_payload_uint3int;
+  }
+  entry->last_seen = k_uptime_get();
+}
+
+static void process_temp_data(uint64_t address, const fusain_packet_t* packet)
+{
+  struct display_appliance_entry* entry = find_or_create_entry(address);
+  if (!entry) {
+    return;
+  }
+
+  struct temp_data_payload decoded;
+  size_t decoded_len;
+  size_t hdr_len = cbor_header_len(packet->msg_type);
+  int ret = cbor_decode_temp_data_payload(
+      packet->payload + hdr_len, packet->length - hdr_len, &decoded, &decoded_len);
+  if (ret != 0) {
+    LOG_DBG("Display: Failed to decode TEMP_DATA: %d", ret);
+    return;
+  }
+
+  /* Use thermometer index 0 for display */
+  if (decoded.temp_data_payload_thermometer_index_m == 0) {
+    entry->temperature = (float)decoded.temp_data_payload_uint2float;
+  }
+  entry->last_seen = k_uptime_get();
+}
+
+//////////////////////////////////////////////////////////////
+// Zbus Callback
+//////////////////////////////////////////////////////////////
+
+void display_raw_rx_callback(const struct zbus_channel* chan)
+{
+  const fusain_raw_packet_msg_t* msg = zbus_chan_const_msg(chan);
+  if (msg == NULL) {
+    return;
+  }
+
+  const fusain_packet_t* packet = &msg->packet;
+  uint64_t source_address = packet->address;
+
+  switch (packet->msg_type) {
+    case FUSAIN_MSG_STATE_DATA:
+      process_state_data(source_address, packet);
+      break;
+    case FUSAIN_MSG_MOTOR_DATA:
+      process_motor_data(source_address, packet);
+      break;
+    case FUSAIN_MSG_TEMP_DATA:
+      process_temp_data(source_address, packet);
+      break;
+    default:
+      /* Ignore other message types */
+      break;
+  }
+}
+
+//////////////////////////////////////////////////////////////
+// State Names
+//////////////////////////////////////////////////////////////
+
 static const char* const fusain_state_names[] = {
   "INIT",    // FUSAIN_STATE_INITIALIZING
   "IDLE",    // FUSAIN_STATE_IDLE
@@ -24,21 +225,18 @@ static const char* const fusain_state_names[] = {
   "E_STOP",  // FUSAIN_STATE_E_STOP
 };
 
-// Custom icon font (1bpp, Font Awesome icons)
+//////////////////////////////////////////////////////////////
+// Custom Fonts
+//////////////////////////////////////////////////////////////
+
 LV_FONT_DECLARE(icons_font);
-#define ICON_FAN "\xEF\xA1\xA3" // UTF-8 encoding of U+F863 (fan)
-#define ICON_TEMP "\xEF\x9D\xA9" // UTF-8 encoding of U+F769 (thermometer)
-#define ICON_PUMP "\xEF\x94\xAF" // UTF-8 encoding of U+F52F (gas pump)
+#define ICON_FAN "\xEF\xA1\xA3"  /* UTF-8 encoding of U+F863 (fan) */
+#define ICON_TEMP "\xEF\x9D\xA9" /* UTF-8 encoding of U+F769 (thermometer) */
+#define ICON_PUMP "\xEF\x94\xAF" /* UTF-8 encoding of U+F52F (gas pump) */
 
-// Configuration
-#define DISPLAY_UPDATE_INTERVAL_MS 200
-#define PUB_TIMEOUT K_MSEC(10)
-
-// Shared telemetry data
-static helios_telemetry_msg_t shared_telemetry = {
-  .valid = false
-};
-K_MUTEX_DEFINE(telemetry_mutex);
+//////////////////////////////////////////////////////////////
+// LVGL State
+//////////////////////////////////////////////////////////////
 
 // Fan icon for animation
 static lv_obj_t* fan_icon_label = NULL;
@@ -49,25 +247,6 @@ static bool fan_anim_running = false;
 static void fan_rotation_anim_cb(void* obj, int32_t value)
 {
   lv_obj_set_style_transform_rotation(obj, value, 0);
-}
-
-// Zbus listener callback
-void display_telemetry_callback(const struct zbus_channel* chan)
-{
-  const helios_telemetry_msg_t* msg = zbus_chan_const_msg(chan);
-
-  k_mutex_lock(&telemetry_mutex, K_FOREVER);
-  // Copy field by field to ensure atomicity
-  shared_telemetry.state = msg->state;
-  shared_telemetry.error = msg->error;
-  shared_telemetry.temperature = msg->temperature;
-  shared_telemetry.motor_rpm = msg->motor_rpm;
-  shared_telemetry.motor_target_rpm = msg->motor_target_rpm;
-  shared_telemetry.valid = msg->valid;
-  k_mutex_unlock(&telemetry_mutex);
-
-  LOG_DBG("Telemetry received: state=%d, temp=%.1f, rpm=%d",
-      msg->state, msg->temperature, msg->motor_rpm);
 }
 
 static void create_home_screen(lv_obj_t** state_label, lv_obj_t** temp_label, lv_obj_t** rpm_label,
@@ -152,32 +331,23 @@ static void update_display(lv_obj_t* state_label, lv_obj_t* temp_label, lv_obj_t
   static char state_buf[32];
   static char temp_buf[32];
   static char rpm_buf[32];
-  helios_telemetry_msg_t t;
 
-  // Read from mutex-protected shared variable
-  k_mutex_lock(&telemetry_mutex, K_FOREVER);
-  // Copy field by field to ensure atomicity
-  t.state = shared_telemetry.state;
-  t.error = shared_telemetry.error;
-  t.temperature = shared_telemetry.temperature;
-  t.motor_rpm = shared_telemetry.motor_rpm;
-  t.motor_target_rpm = shared_telemetry.motor_target_rpm;
-  t.valid = shared_telemetry.valid;
-  k_mutex_unlock(&telemetry_mutex);
+  /* Read telemetry from appliance cache (populated by Zbus callback) */
+  struct display_appliance_entry* entry = &appliance_cache[DISPLAY_APPLIANCE_INDEX];
 
-  if (t.valid && t.state <= FUSAIN_STATE_E_STOP) {
+  if (entry->valid && entry->state <= FUSAIN_STATE_E_STOP) {
     // Clear buffers before formatting to prevent artifacts
     memset(state_buf, 0, sizeof(state_buf));
     memset(temp_buf, 0, sizeof(temp_buf));
     memset(rpm_buf, 0, sizeof(rpm_buf));
 
-    snprintf(state_buf, sizeof(state_buf), "%s", fusain_state_names[t.state]);
+    snprintf(state_buf, sizeof(state_buf), "%s", fusain_state_names[entry->state]);
     // Use leading space for separation from icon
-    snprintf(temp_buf, sizeof(temp_buf), " %.1fC", t.temperature);
-    snprintf(rpm_buf, sizeof(rpm_buf), " %4d", t.motor_rpm);
+    snprintf(temp_buf, sizeof(temp_buf), " %.1fC", (double)entry->temperature);
+    snprintf(rpm_buf, sizeof(rpm_buf), " %4d", entry->motor_rpm);
 
     LOG_DBG("Display: state=%d temp=%.1f rpm=%d/%d | \"%s\" \"%s\" \"%s\"",
-        t.state, t.temperature, t.motor_rpm, t.motor_target_rpm,
+        entry->state, (double)entry->temperature, entry->motor_rpm, entry->motor_target_rpm,
         state_buf, temp_buf, rpm_buf);
 
     lv_label_set_text(state_label, state_buf);
@@ -186,10 +356,10 @@ static void update_display(lv_obj_t* state_label, lv_obj_t* temp_label, lv_obj_t
     lv_label_set_text(pump_label, " 0.0Hz");
 
     // Control fan animation based on RPM
-    if (t.motor_rpm > 0 && !fan_anim_running) {
+    if (entry->motor_rpm > 0 && !fan_anim_running) {
       lv_anim_start(&fan_anim);
       fan_anim_running = true;
-    } else if (t.motor_rpm == 0 && fan_anim_running) {
+    } else if (entry->motor_rpm == 0 && fan_anim_running) {
       lv_anim_delete(fan_icon_label, fan_rotation_anim_cb);
       lv_obj_set_style_transform_rotation(fan_icon_label, 450, 0); // Reset to 45 degrees
       fan_anim_running = false;
