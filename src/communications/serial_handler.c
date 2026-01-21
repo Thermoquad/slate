@@ -59,6 +59,9 @@ struct serial_state {
   bool emergency_stop_confirmed;
   uint64_t last_emergency_stop_time;
 
+  // Helios identity (from received packets)
+  uint64_t helios_address;
+
   // Helios state (from telemetry)
   fusain_state_t helios_state;
   fusain_error_t helios_error;
@@ -90,10 +93,10 @@ static size_t tx_index = 0;
 static size_t tx_length = 0;
 
 /* TX Packet Queue - API pushes, thread pops */
-K_MSGQ_DEFINE(tx_packet_queue, sizeof(fusain_packet_t), 8, 4);
+K_MSGQ_DEFINE(tx_packet_queue, sizeof(fusain_packet_t), 16, 4);
 
 /* RX Packet Queue - ISR pushes, thread pops */
-K_MSGQ_DEFINE(rx_packet_queue, sizeof(fusain_packet_t), 8, 4);
+K_MSGQ_DEFINE(rx_packet_queue, sizeof(fusain_packet_t), 32, 4);
 
 /* Serial State */
 static struct serial_state serial_state;
@@ -538,32 +541,6 @@ static void poll_uart_tx(void)
 //////////////////////////////////////////////////////////////
 
 /**
- * Publish telemetry to Zbus
- *
- * Publishes collected telemetry data to the Zbus channel.
- * Called when we have enough data to send a meaningful update.
- */
-static void publish_telemetry(struct serial_state* state)
-{
-  helios_telemetry_msg_t telemetry_msg = {
-    .state = state->helios_state,
-    .error = state->helios_error,
-    .temperature = state->temperature,
-    .motor_rpm = state->motor_rpm,
-    .motor_target_rpm = state->motor_target_rpm,
-    .valid = true
-  };
-
-  int ret = zbus_chan_pub(&helios_telemetry_chan, &telemetry_msg, PUB_TIMEOUT);
-  if (ret != 0) {
-    LOG_WRN("Failed to publish telemetry to Zbus: %d", ret);
-  }
-
-  LOG_DBG("Telemetry published: state=%d, temp=%.1f, rpm=%d",
-      telemetry_msg.state, telemetry_msg.temperature, telemetry_msg.motor_rpm);
-}
-
-/**
  * Process Received Packet
  *
  * Called from serial thread to process packets queued by UART ISR.
@@ -574,6 +551,14 @@ static void process_packet(const fusain_packet_t* packet, struct serial_state* s
 {
   LOG_DBG("Processing packet: type=0x%02X, length=%u", packet->msg_type,
       packet->length);
+
+  // Track Helios address from received packets (non-zero)
+  if (packet->address != 0) {
+    if (state->helios_address != packet->address) {
+      LOG_INF("Helios address: 0x%llx", packet->address);
+      state->helios_address = packet->address;
+    }
+  }
 
   switch (packet->msg_type) {
   case FUSAIN_MSG_PING_RESPONSE: {
@@ -624,9 +609,6 @@ static void process_packet(const fusain_packet_t* packet, struct serial_state* s
 
     LOG_DBG("State data: state=%u, error=%u", decoded.state_data_payload_state_m,
         decoded.state_data_payload_error_code_m);
-
-    // Publish updated telemetry
-    publish_telemetry(state);
     break;
   }
 
@@ -743,11 +725,23 @@ static void process_packet(const fusain_packet_t* packet, struct serial_state* s
  * Process RX Packets
  *
  * Drains RX packet queue and processes all pending packets.
+ * Also publishes raw packets to fusain_raw_rx_chan for WebSocket bridge.
  */
 static void process_rx_packets(struct serial_state* state, uint64_t current_micros)
 {
   fusain_packet_t rx_packet;
   while (k_msgq_get(&rx_packet_queue, &rx_packet, K_NO_WAIT) == 0) {
+    // Publish raw packet for WebSocket bridge
+    fusain_raw_packet_msg_t raw_msg = {
+        .packet = rx_packet,
+        .timestamp_us = (int64_t)current_micros,
+    };
+    int ret = zbus_chan_pub(&fusain_raw_rx_chan, &raw_msg, K_NO_WAIT);
+    if (ret != 0) {
+      LOG_WRN("Failed to publish raw packet: %d", ret);
+    }
+
+    // Process packet locally
     process_packet(&rx_packet, state, current_micros);
   }
 }
@@ -835,19 +829,38 @@ static void handle_emergency_stop(struct serial_state* state, uint64_t current_m
 /**
  * Check Telemetry Timeout
  *
- * Resets telemetry state if no telemetry received for 30 seconds.
+ * Monitors telemetry health and re-requests if communication is lost.
+ * Fires every 30 seconds while telemetry is not being received.
  */
 static void check_telemetry_timeout(struct serial_state* state, uint64_t current_micros)
 {
-  if (!state->telemetry_received || state->last_telemetry_time == 0) {
+  // Don't check timeout until we've received at least one ping response
+  if (!state->ping_response_received) {
     return;
   }
 
-  const uint64_t micros_since_telemetry = current_micros - state->last_telemetry_time;
-  if (micros_since_telemetry > (TELEMETRY_TIMEOUT_MS * 1000)) {
-    LOG_WRN("Telemetry timeout - no telemetry for %d ms, re-enabling", TELEMETRY_TIMEOUT_MS);
+  // Use last_telemetry_request_time as fallback if we haven't received telemetry yet
+  uint64_t reference_time = state->last_telemetry_time;
+  if (reference_time == 0) {
+    reference_time = state->last_telemetry_request_time;
+  }
+
+  // Nothing to check if we haven't started requesting yet
+  if (reference_time == 0) {
+    return;
+  }
+
+  const uint64_t micros_since_activity = current_micros - reference_time;
+  if (micros_since_activity > (TELEMETRY_TIMEOUT_MS * 1000)) {
+    if (state->telemetry_received) {
+      LOG_WRN("Telemetry timeout - no telemetry for %d ms, re-requesting", TELEMETRY_TIMEOUT_MS);
+    } else {
+      LOG_WRN("Telemetry timeout - still no response after %d ms, retrying", TELEMETRY_TIMEOUT_MS);
+    }
     state->telemetry_received = false;
     state->last_telemetry_time = 0;
+    // Reset request time to trigger immediate re-request
+    state->last_telemetry_request_time = 0;
   }
 }
 
@@ -949,4 +962,26 @@ void serial_handler_get_stats(struct serial_handler_stats* stats)
   stats->ping_response_received = serial_state.ping_response_received;
   stats->telemetry_received = serial_state.telemetry_received;
   stats->helios_uptime_ms = serial_state.helios_uptime_ms;
+}
+
+void serial_handler_get_telemetry(struct serial_handler_telemetry* telemetry)
+{
+  /* Copy telemetry snapshot - no mutex needed, display tolerates tearing */
+  telemetry->state = serial_state.helios_state;
+  telemetry->error = serial_state.helios_error;
+  telemetry->temperature = serial_state.temperature;
+  telemetry->motor_rpm = serial_state.motor_rpm;
+  telemetry->motor_target_rpm = serial_state.motor_target_rpm;
+  telemetry->valid = serial_state.telemetry_received;
+}
+
+uint64_t serial_handler_get_helios_address(void)
+{
+  return serial_state.helios_address;
+}
+
+int serial_handler_send_packet(const fusain_packet_t* packet)
+{
+  send_packet(packet);
+  return 0;
 }

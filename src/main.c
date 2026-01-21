@@ -8,6 +8,8 @@
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/net/http/server.h>
+#include <zephyr/net/http/service.h>
 #include <zephyr/zbus/zbus.h>
 
 #include <slate/config.h>
@@ -16,13 +18,24 @@
 #include <slate/wifi_config.h>
 #include <slate/zbus.h>
 
+/* WebSocket bridge exports (from websocket_bridge.c) */
+extern struct http_resource_detail_websocket ws_fusain_resource_detail;
+extern struct http_resource_detail_dynamic stats_resource_detail;
+extern int ws_fusain_setup(int ws_socket, struct http_request_ctx *request_ctx,
+                           void *user_data);
+extern void fusain_raw_rx_callback(const struct zbus_channel *chan);
+
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 //////////////////////////////////////////////////////////////
 // Zbus Observers
 //////////////////////////////////////////////////////////////
 
-ZBUS_LISTENER_DEFINE(display_listener, display_telemetry_callback);
+/* WebSocket bridge listener - callback defined in websocket_bridge.c */
+ZBUS_LISTENER_DEFINE(ws_bridge_listener, fusain_raw_rx_callback);
+
+/* Display listener - callback defined in display.c */
+ZBUS_LISTENER_DEFINE(display_listener, display_raw_rx_callback);
 
 //////////////////////////////////////////////////////////////
 // Zbus Channel Definitions
@@ -44,18 +57,38 @@ ZBUS_CHAN_DEFINE(helios_state_command_chan,
 );
 
 /**
- * Helios telemetry data channel
+ * Raw Fusain packet RX channel
  *
- * Published by serial handler when telemetry is received from Helios ICU.
- * Display listener receives updates via callback.
+ * Published by serial handler when any packet is received from Helios.
+ * WebSocket bridge and display subscribe to receive packets.
  */
-ZBUS_CHAN_DEFINE(helios_telemetry_chan,
-    helios_telemetry_msg_t,
+ZBUS_CHAN_DEFINE(fusain_raw_rx_chan,
+    fusain_raw_packet_msg_t,
     NULL, // No validator
     NULL, // No user data
-    ZBUS_OBSERVERS(display_listener),
-    ZBUS_MSG_INIT(.valid = false) // Start with invalid data
+    ZBUS_OBSERVERS(ws_bridge_listener, display_listener),
+    ZBUS_MSG_INIT(.timestamp_us = 0) // Initialize with zero timestamp
 );
+
+//////////////////////////////////////////////////////////////
+// HTTP Service and WebSocket Resource
+//////////////////////////////////////////////////////////////
+
+#define HTTP_PORT 80
+
+static uint16_t http_port = HTTP_PORT;
+
+/* HTTP service on port 80 */
+HTTP_SERVICE_DEFINE(fusain_bridge_service, NULL, &http_port,
+                    CONFIG_HTTP_SERVER_MAX_CLIENTS, 10, NULL, NULL, NULL);
+
+/* WebSocket endpoint at /fusain */
+HTTP_RESOURCE_DEFINE(ws_fusain, fusain_bridge_service, "/fusain",
+                     &ws_fusain_resource_detail);
+
+/* Stats endpoint at /stats */
+HTTP_RESOURCE_DEFINE(http_stats, fusain_bridge_service, "/stats",
+                     &stats_resource_detail);
 
 //////////////////////////////////////////////////////////////
 // Input Callback

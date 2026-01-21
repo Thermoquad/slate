@@ -31,6 +31,7 @@ LOG_MODULE_REGISTER(wifi, LOG_LEVEL_INF);
 #define WIFI_THREAD_PRIORITY 6
 
 #define WIFI_LOOP_SLEEP_MS 1000  // Check state every second
+#define WIFI_RETRY_DELAY_MS 1000  // Retry delay for immediate connection request failures
 
 //////////////////////////////////////////////////////////////
 // State Struct Definition
@@ -90,11 +91,14 @@ ZBUS_CHAN_DEFINE(wifi_command_chan,
 		 ZBUS_OBSERVERS(wifi_command_listener),
 		 ZBUS_MSG_INIT(0));
 
+/* WiFi status listener (from websocket_bridge.c) */
+ZBUS_OBS_DECLARE(wifi_status_listener);
+
 ZBUS_CHAN_DEFINE(wifi_status_chan,
 		 wifi_status_msg_t,
 		 NULL,
 		 NULL,
-		 ZBUS_OBSERVERS_EMPTY,
+		 ZBUS_OBSERVERS(wifi_status_listener),
 		 ZBUS_MSG_INIT(0));
 
 //////////////////////////////////////////////////////////////
@@ -175,14 +179,22 @@ static void net_addr_event_handler(struct net_mgmt_event_callback *cb,
 	ARG_UNUSED(cb);
 	ARG_UNUSED(iface);
 
+	LOG_DBG("Network address event: 0x%08llx", mgmt_event);
+
 	// Only process events if WiFi is connected
 	if (!wifi_state.connected) {
+		LOG_DBG("Ignoring event - WiFi not connected");
 		return;
 	}
 
 	switch (mgmt_event) {
 	case NET_EVENT_IPV4_ADDR_ADD:
-		LOG_DBG("IPv4 address added");
+		LOG_INF("IPv4 address added");
+		publish_wifi_status();
+		break;
+
+	case NET_EVENT_IPV4_DHCP_BOUND:
+		LOG_INF("IPv4 DHCP bound");
 		publish_wifi_status();
 		break;
 
@@ -306,6 +318,19 @@ static int wifi_connect_internal(void)
 	if (ret) {
 		LOG_ERR("WiFi connection request failed: %d", ret);
 		wifi_state.connecting = false;
+		wifi_state.connection_failed = true;
+
+		// Adjust last_connect_attempt_time to trigger retry in WIFI_RETRY_DELAY_MS
+		// This allows quick retry for transient errors (e.g., -EAGAIN)
+		uint64_t current_time = k_uptime_get();
+		uint64_t reconnect_interval_ms = wifi_state.reconnect_interval * 1000ULL;
+		wifi_state.last_connect_attempt_time = current_time - reconnect_interval_ms + WIFI_RETRY_DELAY_MS;
+
+		LOG_INF("Will retry connection in %u ms", WIFI_RETRY_DELAY_MS);
+
+		// Publish status update
+		publish_wifi_status();
+
 		return ret;
 	}
 
@@ -601,6 +626,7 @@ static int wifi_init(void)
 	net_mgmt_init_event_callback(&net_addr_mgmt_cb,
 				     net_addr_event_handler,
 				     NET_EVENT_IPV4_ADDR_ADD |
+				     NET_EVENT_IPV4_DHCP_BOUND |
 				     NET_EVENT_IPV6_ADDR_ADD);
 	net_mgmt_add_event_callback(&net_addr_mgmt_cb);
 

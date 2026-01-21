@@ -29,9 +29,10 @@ typedef struct {
 } fusain_state_command_msg_t;
 
 /**
- * Helios telemetry data message
+ * Helios telemetry data message (legacy, kept for compatibility)
  *
- * Published by serial handler when telemetry is received from Helios ICU
+ * Note: Display now reads telemetry directly via serial_handler_get_telemetry()
+ * instead of using Zbus. This type is retained for any future Zbus consumers.
  */
 typedef struct {
 	fusain_state_t state;
@@ -41,6 +42,17 @@ typedef struct {
 	int32_t motor_target_rpm;
 	bool valid;
 } helios_telemetry_msg_t;
+
+/**
+ * Raw Fusain packet message
+ *
+ * Published by serial handler when any packet is received.
+ * Used by WebSocket bridge and other subsystems that need raw packet access.
+ */
+typedef struct {
+	fusain_packet_t packet;
+	int64_t timestamp_us;
+} fusain_raw_packet_msg_t;
 
 /**
  * WiFi command types
@@ -108,13 +120,13 @@ typedef struct {
 ZBUS_CHAN_DECLARE(helios_state_command_chan);
 
 /**
- * Helios telemetry data channel
+ * Raw Fusain packet channel (RX)
  *
- * Message type: helios_telemetry_msg_t
+ * Message type: fusain_raw_packet_msg_t
  * Publishers: Serial handler
- * Subscribers: Display thread
+ * Subscribers: WebSocket bridge, packet logger
  */
-ZBUS_CHAN_DECLARE(helios_telemetry_chan);
+ZBUS_CHAN_DECLARE(fusain_raw_rx_chan);
 
 /**
  * WiFi command channel

@@ -1,0 +1,21 @@
+# Copyright (c) 2025 Kaz Walker, Thermoquad
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+menu "Slate Configuration"
+
+config SLATE_MAX_APPLIANCES
+	int "Maximum number of appliances in cache"
+	default 10
+	range 1 64
+	help
+	  Maximum number of Fusain appliances that can be tracked in the
+	  WebSocket bridge appliance cache. Each appliance entry stores
+	  the latest telemetry packets (STATE_DATA, MOTOR_DATA, PUMP_DATA,
+	  GLOW_DATA, TEMP_DATA) for rate-limited forwarding to WebSocket
+	  clients.
+
+	  Memory usage: approximately 600 bytes per appliance.
+
+endmenu
+
+source "Kconfig.zephyr"

@@ -5,7 +5,17 @@
 
 #include <zephyr/zbus/zbus.h>
 
+/**
+ * Display thread entry point
+ */
 int display_thread(void);
-void display_telemetry_callback(const struct zbus_channel *chan);
+
+/**
+ * Zbus callback for raw Fusain packet processing
+ *
+ * Called by Zbus when a raw packet is received. Updates the display's
+ * appliance cache with decoded telemetry data.
+ */
+void display_raw_rx_callback(const struct zbus_channel* chan);
 
 #endif
